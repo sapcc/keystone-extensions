@@ -1,0 +1,6 @@
+oslo.config
+oslo.log
+py-radius
+requests
+python-memcached>=1.56
+kubernetes>=8.0
