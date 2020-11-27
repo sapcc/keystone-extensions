@@ -1,0 +1,14 @@
+oslo.config
+oslo.log
+oslo.middleware>=3.31.0 # Apache-2.0
+py-radius
+requests
+python-memcached>=1.56
+kubernetes>=8.0
+python-ldap>=3.0.0
+future
+six
+cryptography>=2.1 # BSD/Apache-2.0
+pbr!=2.1.0,>=2.0.0 # Apache-2.0
+WebOb>=1.7.1 # MIT
+Flask!=0.11,>=1.0.2  # BSD
