@@ -109,9 +109,9 @@ class Password(base.AuthMethodHandler):
             basic_auth = 'Basic ' + to_native_string(b64encode(
                 ('%s:%s' % (user, password)).encode('utf-8')).strip())
 
-            response = requests.get(CONF.cc_password.url,
+            response = requests.post(CONF.cc_password.url,
                                     headers={
-                                        'Content-Type': 'application/xml; charset=utf-8',
+                                        'Content-Type': 'application/json; charset=utf-8',
                                         'Authorization': basic_auth
                                     },
                                     verify=CONF.cc_password.secure)
