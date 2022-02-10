@@ -42,7 +42,7 @@ class Password(base.AuthMethodHandler):
     def __init__(self):
         super(Password, self).__init__()
 
-        group = cfg.OptGroup(name='cc_password', title='Outlook Exchange Webservice options')
+        group = cfg.OptGroup(name='cc_password', title='Password Verfication Service options')
         CONF.register_group(group)
         CONF.register_opt(
             cfg.StrOpt('url', help='Password Verification Service URL'),
@@ -95,7 +95,7 @@ class Password(base.AuthMethodHandler):
 
     @staticmethod
     def _authenticate_ews(username, password):
-        """Authenticate a CID user against sap exchange webservice"""
+        """Authenticate a CID user against sap Password Verification Service"""
         try:
             LOG.info("Authenticating %s with SAP Password Verification Service" % username)
             if not username or not password:
