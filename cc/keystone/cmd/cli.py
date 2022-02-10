@@ -17,6 +17,7 @@ from __future__ import print_function
 
 from builtins import input
 
+import datetime
 import re
 
 import pbr.version
@@ -462,12 +463,62 @@ class FernetTokenDoctor(BaseApp):
             print("failed: %s" % e)
 
 
+class ProjectDeletion(BaseApp):
+    """Perform the project deletion workflow
+
+    The project deletion workflow consists of 2 parts:
+    1. For new disabled projects, set their deletion date
+    2. Delete projects whose deletion date has passed
+
+    The deletion date is passed as a parameter. The command honors
+    immutability of the projects.
+    """
+    name = 'project_deletion'
+
+    def __init__(self):
+        super(ProjectDeletion, self).__init__()
+
+    @classmethod
+    def add_argument_parser(cls, subparsers):
+        parser = super(ProjectDeletion, cls).add_argument_parser(subparsers)
+        parser.add_argument('--delete-after-days', default=None, required=True,
+                            type=int, help=('After how many days delete the '
+                                            'projects'))
+        return parser
+
+    @staticmethod
+    def main():
+        drivers = backends.load_backends()
+        resource_manager = drivers['resource_api']
+
+        for project_ref in resource_manager.list_projects():
+            if not project_ref['enabled']:
+                if 'delete_date' not in project_ref['extra']:
+                    # new disabled project; mark it for deletion
+                    LOG.info('Marking project %s (%s) for deletion',
+                             project_ref['id'], project_ref['name'])
+                    delete_after = CONF.command.delete_after_days
+                    delete_date = (datetime.datetime.now() +
+                            datetime.timedelta(days=delete_after))
+                    project_ref['extra']['delete_date'] = delete_date.isoformat()
+                    resource_manager.update_project(project_ref['id'], project_ref)
+                else:
+                    # this is an old disabled project; should we delete it?
+                    delete_date = datetime.datetime.fromisoformat(
+                            project_ref['extra']['delete_date'])
+                    if delete_date < datetime.datetime.now():
+                        LOG.info('Deleting project %s (%s)',
+                                 project_ref['id'], project_ref['name'])
+                        resource_manager.delete_project(project_ref['id'])
+
+
 CMDS = [
     RepairAssignments,
     RepairIdMappings,
     RotateSecretKeys,
     FernetTokenDoctor,
     UserScore,
+    ProjectDeletion,
 ]
 
 
