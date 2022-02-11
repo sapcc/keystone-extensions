@@ -130,7 +130,7 @@ class Password(base.AuthMethodHandler):
             raise
         except Exception as e:
             LOG.error(
-                "SAP Password Verification Service authentication of '%s' against '%s' failed: %s" % (
+                "Callout of '%s' against '%s' to SAP Password Verification Service failed: %s" % (
                     username, CONF.cc_password.url, e))
             raise exception.Unauthorized('Callout to SAP Exchange for password verification failed.')
 
