@@ -42,13 +42,13 @@ class Password(base.AuthMethodHandler):
     def __init__(self):
         super(Password, self).__init__()
 
-        group = cfg.OptGroup(name='cc_password', title='Outlook Exchange Webservice options')
+        group = cfg.OptGroup(name='cc_password', title='Password Verfication Service options')
         CONF.register_group(group)
         CONF.register_opt(
-            cfg.StrOpt('url', help='EWS URL'),
+            cfg.StrOpt('url', help='Password Verification Service URL'),
             group=group)
         CONF.register_opt(
-            cfg.BoolOpt('secure', default=True, help='Verify EWS certificate'),
+            cfg.BoolOpt('secure', default=True, help='Verify Password Verification Service certificate'),
             group=group)
 
     def authenticate(self, auth_payload):
@@ -95,19 +95,17 @@ class Password(base.AuthMethodHandler):
 
     @staticmethod
     def _authenticate_ews(username, password):
-        """Authenticate a CID user against sap exchange webservice"""
+        """Authenticate a CID user against sap Password Verification Service"""
         try:
-            LOG.info("Authenticating %s with SAP EWS" % username)
+            LOG.info("Authenticating %s with SAP Password Verification Service" % username)
             if not username or not password:
                 msg = _('Invalid username or password')
                 raise exception.Unauthorized(msg)
 
-            user = "%s@global.corp.sap" % username
-
             # don't rely on requests to provide the auth header, since it fails
             # miserably with exotic characters in passwords (encoding != latin-1)
             basic_auth = 'Basic ' + to_native_string(b64encode(
-                ('%s:%s' % (user, password)).encode('utf-8')).strip())
+                ('%s:%s' % (username, password)).encode('utf-8')).strip())
 
             response = requests.post(CONF.cc_password.url,
                                     headers={
@@ -121,18 +119,18 @@ class Password(base.AuthMethodHandler):
                 raise exception.Unauthorized(msg)
             if response.status_code != 200:
                 LOG.info(
-                    "SAP EWS authentication of '%s' against '%s' was rejected: %s" % (
+                    "SAP Password Verification Service authentication of '%s' against '%s' was rejected: %s" % (
                         username, CONF.cc_password.url, response.reason))
                 msg = _('Invalid username or password')
                 raise exception.Unauthorized(msg)
 
-            LOG.debug("Authenticated %s with EWS." % username)
+            LOG.debug("Authenticated %s with Password Verification Service." % username)
             return True
         except exception.Unauthorized:
             raise
         except Exception as e:
             LOG.error(
-                "SAP EWS authentication of '%s' against '%s' failed: %s" % (
+                "Callout of '%s' against '%s' to SAP Password Verification Service failed: %s" % (
                     username, CONF.cc_password.url, e))
             raise exception.Unauthorized('Callout to SAP Exchange for password verification failed.')
 
@@ -147,5 +145,5 @@ class Password(base.AuthMethodHandler):
         except Exception as e:
             LOG.error("Password update of '%s' failed: %s" % (userinfo.user_ref['name'], e))
             # ignore for now, since the strict AD password policy might cause issues here and
-            # the users password has been validated against EWS already
+            # the users password has been validated against Password Verification Service already
             # raise exception.Unauthorized(e)
