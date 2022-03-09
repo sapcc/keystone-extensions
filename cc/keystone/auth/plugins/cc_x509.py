@@ -24,12 +24,16 @@ import six
 
 from keystone.auth.plugins import base
 from keystone.auth import plugins
+from keystone.common import provider_api
 from keystone import exception
+from keystone import notifications
 from keystone.i18n import _
 
 from OpenSSL import crypto
 
 from urllib.parse import unquote_to_bytes
+
+PROVIDERS = provider_api.ProviderAPIs
 
 CONF = cfg.CONF
 LOG = log.getLogger(__name__)
@@ -81,6 +85,19 @@ class Base(base.AuthMethodHandler):
             user_ref = self._authenticate(username)
             user_info = plugins.BaseUserInfo.create(user_ref, METHOD_NAME)
             response_data['user_id'] = user_info.user_id
+            # at this point the user is considered to be authenticated, mark
+            # the user as active
+            ref = PROVIDERS.identity_api._shadow_nonlocal_user(user_info.user_ref)
+            PROVIDERS.shadow_users_api.set_last_active_at(ref['id'])
+            # send a notification. The notification wrapper expects that
+            # there is a method that accepts user_id as the first argument,
+            # and that method actually authenticates a user. Out mechanism
+            # verifies authentication differently. So lets provide a simple
+            # wrapper just to please the interface.
+            # TODO: move the actual authn and certificate checks to this
+            # method.
+            self.authenticate_by_id(ref['id'])
+
             return base.AuthHandlerResponse(status=True, response_body=None,
                                             response_data=response_data)
         except Exception as e:
@@ -95,6 +112,10 @@ class Base(base.AuthMethodHandler):
 
         Return user_ref
         """
+        pass
+
+    @notifications.emit_event('authenticate')
+    def authenticate_by_id(self, user_id):
         pass
 
 
