@@ -17,6 +17,7 @@ from __future__ import print_function
 
 from builtins import input
 
+import datetime
 import re
 
 import pbr.version
@@ -33,6 +34,7 @@ from keystone.server import backends
 from cryptography import fernet
 
 from kubernetes import client, config
+import pyredis
 
 from ..middleware import lifesaver_utils
 
@@ -84,6 +86,11 @@ class RepairAssignments(BaseApp):
         parser = super(RepairAssignments, cls).add_argument_parser(subparsers)
         parser.add_argument('--dry-run', default=False, action='store_true',
                             help='Only diagnose, no actual deletion.')
+        parser.add_argument('--user-tolerance-days', default=14,
+                            help=('How many days not to delete orphaned '
+                                  'user\'s assignemnts.'))
+        parser.add_argument('--redis',
+                            help='Redis instance to use.')
         return parser
 
     @staticmethod
@@ -93,6 +100,7 @@ class RepairAssignments(BaseApp):
         project_cache = {}
         user_cache = {}
         group_cache = {}
+        redis = pyredis.Client(CONF.command.redis)
 
         def get_domain(id):
             result = None
@@ -123,6 +131,20 @@ class RepairAssignments(BaseApp):
             else:
                 result = user_cache[id]
             return result
+
+        def get_or_set_user_timestamp(id, dry_run=False):
+            PREFIX = 'user_timestamp'
+            timestamp = float(redis.get(f'{PREFIX}:{id}'))
+            if timestamp:
+                timestamp = datetime.datetime.fromtimestamp(timestamp)
+            else:
+                timestamp = datetime.datetime.now()
+                if dry_run:
+                    LOG.warning(
+                        f"User {id} -> does not exist since now")
+                else:
+                    redis.set(f'{PREFIX}:{id}', timestamp.timestamp())
+            return timestamp
 
         def get_group(id):
             result = None
@@ -159,17 +181,30 @@ class RepairAssignments(BaseApp):
                 if 'group_id' in assignment:
                     get_group(assignment['group_id'])
             except exception.UserNotFound as e:
-                if CONF.command.dry_run:
-                    LOG.warning(
-                        "%s -> found orphaned role-assignments for user %s (%s)" % (
+                # user might disappear from ldap for some reason, but also
+                # might reappear. In order not to break their workflow, we give
+                # a certain tolerance to their non-existence. The tolerance
+                # is implemented via a timestamp stored for that user.
+                timestamp = get_or_set_user_timestamp(
+                    assignment['user_id'],
+                    dry_run=CONF.command.dry_run)
+                delta = (datetime.datetime.now() - timestamp).days
+                if delta > CONF.command.user_tolerance_days:
+                    if CONF.command.dry_run:
+                        LOG.warning(
+                            "%s -> found orphaned role-assignments for user %s (%s)" % (
+                                e.message, assignment['user_id'], assignment))
+                    else:
+                        LOG.warning(
+                            "%s -> deleting role-assignments for user %s (%s)" % (
                             e.message, assignment['user_id'], assignment))
+                        assignment_manager.driver.delete_user_assignments(
+                            assignment['user_id'])
                 else:
                     LOG.warning(
-                        "%s -> deleting role-assignments for user %s (%s)" % (
-                            e.message, assignment['user_id'], assignment))
-                    assignment_manager.driver.delete_user_assignments(
-                        assignment['user_id'])
-
+                        ("%s -> orphaned role-assignments for user %s "
+                            "(%s) is tolerated for %s days") % (
+                                e.message, assignment['user_id'], assignment, delta))
             except exception.GroupNotFound as e:
                 if CONF.command.dry_run:
                     LOG.warning(
