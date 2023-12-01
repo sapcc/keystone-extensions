@@ -81,6 +81,36 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                             if user:
                                 user = 'ac-' + user
 
+            elif (('/v3/s3tokens' == request.path or
+                   '/v3/ec2tokens' == request.path) and
+                  'POST' == request.method):
+                # s3tokens/ec2tokens never contains user id, so use
+                # credential's `access` field to identify it
+                body = request.json_body
+                # the order is taken from EC2_S3_Resource.py in keystone
+                credentials = (
+                    body.get('credentials') or
+                    body.get('credential') or
+                    body.get('ec2Credentials')
+                )
+                if '/v3/s3tokens' == request.path:
+                    prefix = 's3creds'
+                elif '/v3/ec2tokens' == request.path:
+                    prefix = 'ec2creds'
+                if credentials:
+                    try:
+                        user = prefix + '-' + credentials['access']
+                        # ec2tokens and s3tokens API are domain unaware. Lets
+                        # just log it.
+                        domain = 'unknown'
+                        # the message will look like this:
+                        # Blocking request POST /v3/s3tokens, since user \
+                        # b's3creds-123456' b'unknown' has no credit left
+                        # OR 'b'ec2creds-123456 b'unknown' has no credit left
+                    except KeyError:
+                        pass
+
+
             # grab credentials from an authenticated request
             if not user or not domain:
                 context = request.environ
