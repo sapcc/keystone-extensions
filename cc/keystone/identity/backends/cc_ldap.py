@@ -75,6 +75,8 @@ class Identity(ldap_backend.Identity):
             raise exception.Conflict(_('Cannot change user name'))
 
         if 'password' in user:
+            # Ensure user is enabled when setting the password
+            user['enabled'] = True
             # force LDAP replace
             old_obj['password'] = 'fake'
             LOG.info("User password update %s" % user_id)
