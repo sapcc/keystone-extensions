@@ -78,7 +78,13 @@ class Base(base.AuthMethodHandler):
         except Exception as e:
             LOG.info("Invalid certificate from %s: %s" % (flask.request.environ.get('REMOTE_ADDR'), e))
             if CONF.debug:
-                LOG.info("%s", crypto.dump_certificate(crypto.FILETYPE_TEXT, cert))
+                try:
+                    LOG.info("%s", crypto.dump_certificate(crypto.FILETYPE_TEXT, cert))
+                except AttributeError:
+                    # there is a bug somewhere that prevents dumping the
+                    # cert info; since this is just a log message, it
+                    # should not block us
+                    LOG.info("Could not decode cert: \"%s\"", cert)
             raise exception.Unauthorized("Authentication failed. No trusted certificate provided: %s" % e)
 
         try:
