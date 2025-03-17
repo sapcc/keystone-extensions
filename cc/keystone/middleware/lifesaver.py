@@ -145,11 +145,69 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)}
 
+
+    def get_token(self, request) -> None | str:
+        """
+        Tries to fetch token id from the request
+        :param request: the clients request
+        :return: str 'token_id'
+        """
+
+        # shortcut for version discovery request
+        if '/v3/' == request.path:
+            return None
+
+        token_id = None
+
+        try:
+            # grab toekn from an authentication request
+            if '/v3/auth/tokens' == request.path and 'POST' == request.method:
+                body = request.json_body
+                if 'auth' in body:
+                    if 'identity' in body['auth']:
+                        if 'token' in body['auth']['identity']:
+                            token_id = body['auth']['identity']['token'].get('id', None)
+
+        except Exception as e:
+            self.logger.error("Could not extract token from request: %s %s" % (request, e))
+
+        return token_id
+
+
     def process_request(self, request):
         return self.verify_request(request)
 
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
+
+    def calculate_score(self, request, response, item, item_score):
+        status = response.status_code
+        # update user score?
+        self.logger.info("STATUS_CODE: %s", status)
+        if status >= 400:
+            # what penalty should be applied?
+            cost = self.utils.status_cost['default']
+            if str(status) in self.utils.status_cost:
+                cost = self.utils.status_cost[str(status)]
+                # mark request as processed
+                request.environ['lifesaver'] = item
+
+            # deduct user credit ?
+            if int(cost) > 0:
+                item_score.reduce(int(cost))
+                # update score metadata in case the configuration has changed
+                if item_score.credit != self.utils.credit:
+                    item_score.credit = self.utils.credit
+                if item_score.refill_time != self.utils.refill_time:
+                    item_score.refill_time = self.utils.refill_time
+                if item_score.refill_amount != self.utils.refill_amount:
+                    item_score.refill_amount = self.utils.refill_amount
+
+                self.utils.set_score(item, item_score)
+                self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
+                item, item_score.get(), request.method, request.path,
+                status))
+
 
     def verify_request(self, request, response=None):
         """
@@ -160,7 +218,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         """
         result = response
 
-        # skip if not enabled
         if not self.utils.enabled:
             return result
 
@@ -170,7 +227,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         credentials = self.get_user(request)
         if credentials:
-            # request from allowlisted domain?
             domain = credentials['domain'].encode('utf8')
             if domain and credentials['domain'] in self.utils.domain_allowlist:
                 return result
@@ -186,7 +242,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     self.logger.info("Request from blocklisted user %s rejected" % user)
                     return self.blocklist_response
 
-                user_score = self.utils.get_user_score(credentials['user'])
+                user_score = self.utils.get_score(credentials['user'])
 
                 if user_score.get() == 0:
                     self.logger.info("Blocking request %s %s, since user %s %s has no credit left" % (
@@ -194,33 +250,19 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     return self.ratelimit_response
 
                 if response:
-                    status = response.status_code
+                    self.calculate_score(request, response, user, user_score)
 
-                    # update user score?
-                    if status >= 400:
-                        # what penalty should be applied?
-                        cost = self.utils.status_cost['default']
-                        if str(status) in self.utils.status_cost:
-                            cost = self.utils.status_cost[str(status)]
-                            # mark request as processed
-                            request.environ['lifesaver'] = user
+        token = self.get_token(request)
+        if token:
+            token_score = self.utils.get_score(token)
+            if token_score.get() == 0:
+                self.logger.info("Blocking request %s %s, since token %s has no credit left" % (
+                request.method, request.path, token))
+                return self.ratelimit_response
 
-                        # deduct user credit ?
-                        if int(cost) > 0:
-                            user_score.reduce(int(cost))
+            if response:
+                self.calculate_score(request, response, token, token_score)
 
-                            # update score metadata in case the configuration has changed
-                            if user_score.credit != self.utils.credit:
-                                user_score.credit = self.utils.credit
-                            if user_score.refill_time != self.utils.refill_time:
-                                user_score.refill_time = self.utils.refill_time
-                            if user_score.refill_amount != self.utils.refill_amount:
-                                user_score.refill_amount = self.utils.refill_amount
-
-                            self.utils.set_user_score(credentials['user'], user_score)
-                            self.logger.info("User %s %s has a remaining credit of %d - request %s %s returned %d" % (
-                            user, domain, user_score.get(), request.method, request.path,
-                            status))
 
         return result
 
