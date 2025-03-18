@@ -18,6 +18,8 @@ from oslo_middleware import base
 from . import lifesaver_utils as utils
 from . import response
 
+from webob import Request
+
 CONF = keystone.conf.CONF
 
 
@@ -146,7 +148,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)}
 
 
-    def get_token(self, request) -> None | str:
+    def get_token(self, request: Request) -> None | str:
         """
         Tries to fetch token id from the request
         :param request: the clients request
@@ -158,18 +160,19 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             return None
 
         token_id = None
-
         try:
-            # grab toekn from an authentication request
             if '/v3/auth/tokens' == request.path and 'POST' == request.method:
                 body = request.json_body
-                if 'auth' in body:
-                    if 'identity' in body['auth']:
-                        if 'token' in body['auth']['identity']:
-                            token_id = body['auth']['identity']['token'].get('id', None)
+                auth = body.get('auth', {})
+                identity = auth.get('identity', {})
+                token = identity.get('token', {})
+                token_id = token.get('id', None)
+            elif '/v3/auth/tokens' == request.path and 'GET' == request.method:
+                if "X-Subject-Token" in request.headers.keys():
+                    token_id = request.headers.get("X-Subject-Token")
 
         except Exception as e:
-            self.logger.error("Could not extract token from request: %s %s" % (request, e))
+            self.logger.error("Could not extract token from request: %s %s", request, e)
 
         return token_id
 
@@ -180,33 +183,40 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
 
-    def calculate_score(self, request, response, item, item_score):
-        status = response.status_code
-        # update user score?
-        self.logger.info("STATUS_CODE: %s", status)
+    def get_costs(self, status: int, type: str) -> int:
+        cost = 0
         if status >= 400:
             # what penalty should be applied?
-            cost = self.utils.status_cost['default']
-            if str(status) in self.utils.status_cost:
-                cost = self.utils.status_cost[str(status)]
-                # mark request as processed
-                request.environ['lifesaver'] = item
+            if type == "User":
+                cost = self.utils.status_cost['default']
+                if str(status) in self.utils.status_cost:
+                    cost = self.utils.status_cost[str(status)]
+            elif type == "Token":
+                cost = self.utils.token_cost['default']
+                if str(status) in self.utils.token_cost:
+                    cost = self.utils.token_cost[str(status)]
+        return cost
 
-            # deduct user credit ?
-            if int(cost) > 0:
-                item_score.reduce(int(cost))
-                # update score metadata in case the configuration has changed
-                if item_score.credit != self.utils.credit:
-                    item_score.credit = self.utils.credit
-                if item_score.refill_time != self.utils.refill_time:
-                    item_score.refill_time = self.utils.refill_time
-                if item_score.refill_amount != self.utils.refill_amount:
-                    item_score.refill_amount = self.utils.refill_amount
+    def calculate_score(self, request, response, item, item_score, type="User"):
+        status = response.status_code
+        cost = self.get_costs(status, type)
+        # deduct user credit ?
+        if int(cost) > 0:
+            # mark request as processed
+            request.environ['lifesaver'] = item
+            item_score.reduce(int(cost))
+            # update score metadata in case the configuration has changed
+            if item_score.credit != self.utils.credit:
+                item_score.credit = self.utils.credit
+            if item_score.refill_time != self.utils.refill_time:
+                item_score.refill_time = self.utils.refill_time
+            if item_score.refill_amount != self.utils.refill_amount:
+                item_score.refill_amount = self.utils.refill_amount
 
-                self.utils.set_score(item, item_score)
-                self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
-                item, item_score.get(), request.method, request.path,
-                status))
+            self.utils.set_score(item, item_score)
+            self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
+            item, item_score.get(), request.method, request.path,
+            status))
 
 
     def verify_request(self, request, response=None):
@@ -250,7 +260,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     return self.ratelimit_response
 
                 if response:
-                    self.calculate_score(request, response, user, user_score)
+                    self.calculate_score(request, response, user, user_score, type="User")
 
         token = self.get_token(request)
         if token:
@@ -261,7 +271,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                 return self.ratelimit_response
 
             if response:
-                self.calculate_score(request, response, token, token_score)
+                self.calculate_score(request, response, token, token_score, type="Token")
 
 
         return result
