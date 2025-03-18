@@ -183,23 +183,23 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
 
-    def get_costs(self, status: int, type: str) -> int:
+    def get_costs(self, status: int, validation_type: str) -> int:
         cost = 0
         if status >= 400:
             # what penalty should be applied?
-            if type == "User":
+            if validation_type == "User":
                 cost = self.utils.status_cost['default']
                 if str(status) in self.utils.status_cost:
                     cost = self.utils.status_cost[str(status)]
-            elif type == "Token":
+            elif validation_type == "Token":
                 cost = self.utils.token_cost['default']
                 if str(status) in self.utils.token_cost:
                     cost = self.utils.token_cost[str(status)]
         return cost
 
-    def calculate_score(self, request, response, item, item_score, type="User"):
+    def calculate_score(self, request, response, item, item_score, validation_type="User"):
         status = response.status_code
-        cost = self.get_costs(status, type)
+        cost = self.get_costs(status, validation_type)
         # deduct user credit ?
         if int(cost) > 0:
             # mark request as processed
@@ -260,7 +260,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     return self.ratelimit_response
 
                 if response:
-                    self.calculate_score(request, response, user, user_score, type="User")
+                    self.calculate_score(request, response, user, user_score, validation_type="User")
 
         token = self.get_token(request)
         if token:
@@ -271,7 +271,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                 return self.ratelimit_response
 
             if response:
-                self.calculate_score(request, response, token, token_score, type="Token")
+                self.calculate_score(request, response, token, token_score, validation_type="Token")
 
 
         return result
