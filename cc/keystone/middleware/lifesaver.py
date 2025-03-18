@@ -12,6 +12,8 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from json.decoder import JSONDecodeError
+
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -170,7 +172,8 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             elif '/v3/auth/tokens' == request.path and 'GET' == request.method:
                 if "X-Subject-Token" in request.headers.keys():
                     token_id = request.headers.get("X-Subject-Token")
-
+        except JSONDecodeError as e:
+            self.logger.error("Could not decode JSON request: %s %s", request, e)
         except Exception as e:
             self.logger.error("Could not extract token from request: %s %s", request, e)
 
