@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import json
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -105,8 +106,12 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                                     domain_info = user_info.get('domain', None)
                                     if domain_info:
                                         domain = domain_info.get('name', None)
+        except json.JSONDecodeError as e:
+            self.logger.error("Invalid JSON format: %s. Path: %s, Method: %s", e, request.path, request.method)
+        except ValueError as e:
+            self.logger.error("Malformed JSON body in request: %s. Path: %s, Method: %s", e, request.path, request.method)
         except Exception as e:
-            self.logger.error("Could not extract credentials from request: %s %s" % (request, e))
+            self.logger.error("Unexpected error while extracting credentials: %s. Path: %s, Method: %s", e, request.path, request.method)
 
         if not user:
             user = ''
