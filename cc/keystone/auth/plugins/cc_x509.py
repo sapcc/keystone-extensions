@@ -15,7 +15,10 @@
 """Keystone x509 based Authentication Plugin"""
 
 import abc
+import base64
+import binascii
 import flask
+import re
 
 from oslo_config import cfg
 from oslo_log import log
@@ -41,8 +44,34 @@ LOG = log.getLogger(__name__)
 METHOD_NAME = 'external'
 
 
+def _ensure_pem(cert_text):
+    """
+    Ensure the provided certificate text is a PEM formatted block.
+    Case 1: certificate already has PEM labels, nothing needs to be done.
+    Case 2: certificate doesn't have PEM labels and is coming from Akamai.
+    """
+    if not cert_text:
+        return cert_text
+
+    if isinstance(cert_text, bytes):
+        cert_text = cert_text.decode('utf-8')  # cert might be bytes
+
+    if ('BEGIN%20CERTIFICATE' in cert_text and 'END%20CERTIFICATE' in cert_text):
+        # Case 1 - already PEM formatted, but not unquoted
+        return cert_text
+
+    # Case 2 - add new line breaks every 64 chars to make a PEM format
+    cert = re.sub("(.{64})", "\\1\n", cert_text, 0, re.DOTALL)
+
+    # Case 2 - add PEM labels around the result
+    cert = '-----BEGIN CERTIFICATE-----\n%s\n%s' % (cert, '-----END CERTIFICATE-----')
+
+    return cert
+
+
 @six.add_metaclass(abc.ABCMeta)
 class Base(base.AuthMethodHandler):
+
     def authenticate(self, auth_info):
         """Use HTTP_SSL_CLIENT_CERT to look up the user in the identity backend.
         """
@@ -52,14 +81,26 @@ class Base(base.AuthMethodHandler):
         try:
             # client certificate validated?
             verification = flask.request.environ[CONF.cc_x509.certificate_verify_header]
+
             if verification != 'SUCCESS':
                 raise Exception("Certificate has not been validated")
 
             # grab the certificate
-            certificate = flask.request.environ[CONF.cc_x509.certificate_header]
+            cert_header = flask.request.environ[CONF.cc_x509.certificate_header]
+
+            # the certificate will be Base64 encoded when coming from Akamai:
+            try:
+                certificate = base64.b64decode(cert_header, validate=True)
+            except binascii.Error:
+                # if not base64 encoded, use as is:
+                certificate = cert_header
+
+            # ensure PEM markers are present and certificate formatted correctly
+            certificate = _ensure_pem(certificate)
+
             cert = crypto.load_certificate(crypto.FILETYPE_PEM, unquote_to_bytes(certificate))
 
-            # is it stil valid?
+            # is it still valid?
             if cert.has_expired():
                 raise Exception("certificate has expired")
 
