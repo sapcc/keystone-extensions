@@ -81,6 +81,7 @@ class Base(base.AuthMethodHandler):
         """Use HTTP_SSL_CLIENT_CERT to look up the user in the identity backend.
         """
         response_data = {}
+        certificate_header_value = ''
         cert = ''
 
         try:
@@ -118,7 +119,7 @@ class Base(base.AuthMethodHandler):
                     # there is a bug somewhere that prevents dumping the
                     # cert info; since this is just a log message, it
                     # should not block us
-                    LOG.info("Could not decode cert: \"%s\"", cert)
+                    LOG.info("Could not process certificate_header: \"%s\"", certificate_header_value)
             raise exception.Unauthorized("Authentication failed. No trusted certificate provided: %s" % e)
 
         try:
