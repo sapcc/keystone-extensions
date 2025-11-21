@@ -44,3 +44,9 @@ Da1dTVdWvf5PiMMpTslDOziEYSOSILKMTBTl"""
         # akamai format
         cert = base64.b64encode(self.pem_data.encode())
         self._assert_parse_certificate(cert)
+
+    def test_b64encoded_pem_without_labels_as_single_line(self):
+        # akamai format where pem data is formatted as a single line
+        cert = "".join(self.pem_data.splitlines())
+        cert = base64.b64encode(cert.encode())
+        self._assert_parse_certificate(cert)
