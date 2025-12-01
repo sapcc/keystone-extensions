@@ -15,6 +15,9 @@
 """Keystone x509 based Authentication Plugin"""
 
 import abc
+import base64
+
+import OpenSSL
 import flask
 
 from oslo_config import cfg
@@ -39,6 +42,37 @@ CONF = cfg.CONF
 LOG = log.getLogger(__name__)
 
 METHOD_NAME = 'external'
+URLENCODED_PEM_CERTIFICATE_PREFIX = b"-----BEGIN%20CERTIFICATE-----%0"
+
+
+
+def parse_certificate(pem_input: str | bytes) -> OpenSSL.crypto.X509:
+    """Parses formatted PEM input into OpenSSL.crypto.X509 certificate.
+
+    Supported PEM input formats:
+    * certificate as formatted by ingress-nginx, see https://github.com/kubernetes/ingress-nginx/blob/f820c51858ac98314ca535e091211ed13f1d5b62/docs/user-guide/nginx-configuration/annotations.md?plain=1#L284)
+    * certificate as formatted by Akamai, see "Cert PEM No Labels" @ https://techdocs.akamai.com/property-mgr/docs/set-var-extraction
+    """
+
+    if isinstance(pem_input, str):
+        pem_input = pem_input.encode()
+
+    if pem_input.startswith(URLENCODED_PEM_CERTIFICATE_PREFIX):
+        # assume ingress-nginx format
+        pem_certificate = unquote_to_bytes(pem_input)
+    else:
+        # otherwise, assume Akamai format
+        pem_data = base64.b64decode(pem_input, validate=True)
+        pem_certificate = b"\n".join([
+            b"-----BEGIN CERTIFICATE-----",
+            pem_data,
+            b"-----END CERTIFICATE-----",
+            b"",
+        ])
+    x509_certificate = crypto.load_certificate(crypto.FILETYPE_PEM, pem_certificate)
+
+    return x509_certificate
+
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -47,6 +81,7 @@ class Base(base.AuthMethodHandler):
         """Use HTTP_SSL_CLIENT_CERT to look up the user in the identity backend.
         """
         response_data = {}
+        certificate_header_value = ''
         cert = ''
 
         try:
@@ -56,8 +91,8 @@ class Base(base.AuthMethodHandler):
                 raise Exception("Certificate has not been validated")
 
             # grab the certificate
-            certificate = flask.request.environ[CONF.cc_x509.certificate_header]
-            cert = crypto.load_certificate(crypto.FILETYPE_PEM, unquote_to_bytes(certificate))
+            certificate_header_value = flask.request.environ[CONF.cc_x509.certificate_header]
+            cert = parse_certificate(certificate_header_value)
 
             # is it stil valid?
             if cert.has_expired():
@@ -84,7 +119,7 @@ class Base(base.AuthMethodHandler):
                     # there is a bug somewhere that prevents dumping the
                     # cert info; since this is just a log message, it
                     # should not block us
-                    LOG.info("Could not decode cert: \"%s\"", cert)
+                    LOG.info("Could not process certificate_header: \"%s\"", certificate_header_value)
             raise exception.Unauthorized("Authentication failed. No trusted certificate provided: %s" % e)
 
         try:
