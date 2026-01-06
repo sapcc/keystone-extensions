@@ -17,7 +17,10 @@ from json.decoder import JSONDecodeError
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
+from keystone.token.providers import fernet
+
 from . import lifesaver_utils as utils
+from . import lifesaver_logic as logic
 from . import response
 
 from webob import Request
@@ -32,6 +35,8 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         self.logger = log.getLogger(__name__)
         self.app = app
         self.utils = utils.LifesaverUtils(conf)
+        self.fernet_provider = fernet.Provider()
+
 
         # default responses
         self.ratelimit_response = response.RateLimitExceededResponse()
@@ -62,123 +67,39 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         user = None
         domain = None
+        token_id = None
 
         try:
-            # grab credentials from an authentication request
-            if '/v3/auth/tokens' == request.path and 'POST' == request.method:
-                body = request.json_body
-                if 'auth' in body:
-                    if 'identity' in body['auth']:
-                        if 'password' in body['auth']['identity']:
-                            if 'user' in body['auth']['identity']['password']:
-                                user = body['auth']['identity']['password']['user'].get('name', None)
-                                if not user:
-                                    user = body['auth']['identity']['password']['user'].get('id', None)
-                                    if user:
-                                        user = 'id-' + user
-                                if 'domain' in body['auth']['identity']['password']['user']:
-                                    domain = body['auth']['identity']['password']['user']['domain'].get('name', None)
-                                    if not domain:
-                                        domain = body['auth']['identity']['password']['user']['domain'].get('id', None)
-                        elif 'application_credential' in body['auth']['identity']:
-                            user = body['auth']['identity']['application_credential'].get('id', None)
-                            if user:
-                                user = 'ac-' + user
-
-            elif (('/v3/s3tokens' == request.path or
-                   '/v3/ec2tokens' == request.path) and
-                  'POST' == request.method):
-                # s3tokens/ec2tokens never contains user id, so use
-                # credential's `access` field to identify it
-                body = request.json_body
-                # the order is taken from EC2_S3_Resource.py in keystone
-                credentials = (
-                    body.get('credentials') or
-                    body.get('credential') or
-                    body.get('ec2Credentials')
-                )
-                if '/v3/s3tokens' == request.path:
-                    prefix = 's3creds'
-                elif '/v3/ec2tokens' == request.path:
-                    prefix = 'ec2creds'
-                if credentials:
+            user, domain = logic.extract_password_auth_credentials(request)
+            if not user:
+                user = logic.extract_app_credential(request)
+            if not user:
+                token_id = logic.extract_token_id(request)
+                if token_id:
+                    # use fernet provider to decode token and extract user id and domain
                     try:
-                        user = prefix + '-' + credentials['access']
-                        # ec2tokens and s3tokens API are domain unaware. Lets
-                        # just log it.
-                        domain = 'unknown'
-                        # the message will look like this:
-                        # Blocking request POST /v3/s3tokens, since user \
-                        # b's3creds-123456' b'unknown' has no credit left
-                        # OR 'b'ec2creds-123456 b'unknown' has no credit left
-                    except KeyError:
-                        pass
-
-
-            # grab credentials from an authenticated request
-            if not user or not domain:
-                context = request.environ
-
-                if 'KEYSTONE_AUTH_CONTEXT' in context:
-                    # grab from request env
-                    if not user:
-                        user = context.get('HTTP_X_USER_NAME', None)
-                    if not domain:
-                        domain = context.get('HTTP_X_USER_DOMAIN_NAME', None)
-
-                    # try token info
-                    if not user or not domain:
-                        # grab from token
-                        token_info = context.get('keystone.token_info', None)
-                        if token_info:
-                            token = token_info.get('token', None)
-                            if token:
-                                user_info = token.get('user', None)
-                                if user_info:
-                                    user = user_info.get('name', None)
-                                    domain_info = user_info.get('domain', None)
-                                    if domain_info:
-                                        domain = domain_info.get('name', None)
+                        (user_id, methods, audit_ids, system, domain, project_id,
+                trust_id, federated_group_ids, identity_provider_id,
+                protocol_id, access_token_id, app_cred_id, thumbprint,
+                issued_at, expires_at) = self.fernet_provider.validate_token(token_id)
+                        if user_id:
+                            user = 'ftokencreds-' + user_id
+                    except Exception as e:
+                        self.logger.error("Could not validate token ...%s: %s" % (token_id[:8], str(e)))
+            if not user:
+                user, domain = logic.extract_s3_ec2_credentials(request)
+            if not user:
+                user, domain = logic.extract_from_authentication_request(request)
         except Exception as e:
-            self.logger.error("Could not extract credentials from request: %s %s" % (request, e))
+            self.logger.error("Could not extract credentials from request: %s %s %s" % (
+                request.method, request.path, e))
 
         if not user:
             user = ''
         if not domain:
             domain = ''
 
-        return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)}
-
-
-    def get_token(self, request: Request) -> None | str:
-        """
-        Tries to fetch token id from the request
-        :param request: the clients request
-        :return: str 'token_id'
-        """
-
-        # shortcut for version discovery request
-        if '/v3/' == request.path:
-            return None
-
-        token_id = None
-        try:
-            if '/v3/auth/tokens' == request.path and 'POST' == request.method:
-                body = request.json_body
-                auth = body.get('auth', {})
-                identity = auth.get('identity', {})
-                token = identity.get('token', {})
-                token_id = token.get('id', None)
-            elif '/v3/auth/tokens' == request.path and 'GET' == request.method:
-                if "X-Subject-Token" in request.headers.keys():
-                    token_id = request.headers.get("X-Subject-Token")
-        except JSONDecodeError as e:
-            self.logger.error("Could not decode JSON request: %s %s", request, e)
-        except Exception as e:
-            self.logger.error("Could not extract token from request: %s %s", request, e)
-
-        return token_id
-
+        return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)} 
 
     def process_request(self, request):
         return self.verify_request(request)
@@ -186,23 +107,21 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
 
-    def get_costs(self, status: int, validation_type: str) -> int:
+    def get_costs(self, request, response, item, item_score):
+        status = response.status_code
         cost = 0
+        # determine cost based on response status
         if status >= 400:
-            # what penalty should be applied?
-            if validation_type == "User":
-                cost = self.utils.status_cost['default']
-                if str(status) in self.utils.status_cost:
-                    cost = self.utils.status_cost[str(status)]
-            elif validation_type == "Token":
+            # check prefix to decide which cost table to use
+            if item.startswith("FTOKENCREDS-"):
                 cost = self.utils.token_cost['default']
                 if str(status) in self.utils.token_cost:
                     cost = self.utils.token_cost[str(status)]
-        return cost
+            else:
+                cost = self.utils.status_cost['default']
+                if str(status) in self.utils.status_cost:
+                    cost = self.utils.status_cost[str(status)]
 
-    def calculate_score(self, request, response, item, item_score, validation_type="User"):
-        status = response.status_code
-        cost = self.get_costs(status, validation_type)
         # deduct user credit ?
         if int(cost) > 0:
             # mark request as processed
@@ -240,11 +159,11 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         credentials = self.get_user(request)
         if credentials:
-            domain = credentials['domain'].encode('utf8')
+            domain = credentials['domain']
             if domain and credentials['domain'] in self.utils.domain_allowlist:
                 return result
 
-            user = credentials['user'].encode('utf8')
+            user = credentials['user']
             if user:
                 # request from allowlisted user?
                 if credentials['user'] in self.utils.user_allowlist:
@@ -263,19 +182,10 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     return self.ratelimit_response
 
                 if response:
-                    self.calculate_score(request, response, user, user_score, validation_type="User")
-
-        token = self.get_token(request)
-        if token:
-            token_score = self.utils.get_score(token)
-            if token_score.get() == 0:
-                self.logger.info("Blocking request %s %s, since token %s has no credit left" % (
-                request.method, request.path, token))
-                return self.ratelimit_response
-
-            if response:
-                self.calculate_score(request, response, token, token_score, validation_type="Token")
-
+                    self.logger.info("Response exists, calling calculate_score")
+                    self.get_costs(request, response, user, user_score)
+                else:
+                    self.logger.info("No response, skipping calculate_score")
 
         return result
 
