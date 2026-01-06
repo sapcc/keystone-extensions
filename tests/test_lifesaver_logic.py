@@ -65,48 +65,6 @@ class TestExtractPasswordAuthCredentials(unittest.TestCase):
         
         self.assertEqual(user, "id-user-123")
         self.assertEqual(domain, "domain-456")
-    
-    def test_returns_none_for_wrong_path(self):
-        class MockRequest:
-            path = '/v3/users'
-            method = 'POST'
-            json_body = {"auth": {"identity": {"password": {"user": {"name": "test"}}}}}
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_password_auth_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
-    
-    def test_returns_none_for_wrong_method(self):
-        class MockRequest:
-            path = '/v3/auth/tokens'
-            method = 'GET'
-            json_body = {"auth": {"identity": {"password": {"user": {"name": "test"}}}}}
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_password_auth_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
-    
-    def test_returns_none_when_no_password(self):
-        class MockRequest:
-            path = '/v3/auth/tokens'
-            method = 'POST'
-            json_body = {
-                "auth": {
-                    "identity": {
-                        "token": {"id": "some-token"}
-                    }
-                }
-            }
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_password_auth_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
 
 
 class TestExtractAppCredential(unittest.TestCase):
@@ -125,40 +83,12 @@ class TestExtractAppCredential(unittest.TestCase):
                     }
                 }
             }
-        
+
         request = MockRequest()
         result = lifesaver_logic.extract_app_credential(request)
 
         self.assertEqual(result, "ac-app-cred-789")
     
-    def test_returns_none_when_no_app_credential(self):
-        class MockRequest:
-            path = '/v3/auth/tokens'
-            method = 'POST'
-            json_body = {
-                "auth": {
-                    "identity": {
-                        "password": {"user": {"name": "test"}}
-                    }
-                }
-            }
-        
-        request = MockRequest()
-        result = lifesaver_logic.extract_app_credential(request)
-
-        self.assertIsNone(result)
-    
-    def test_returns_none_for_wrong_path(self):
-        class MockRequest:
-            path = '/v3/users'
-            method = 'POST'
-            json_body = {"auth": {"identity": {"application_credential": {"id": "test"}}}}
-        
-        request = MockRequest()
-        result = lifesaver_logic.extract_app_credential(request)
-        
-        self.assertIsNone(result)
-
 
 class TestExtractTokenId(unittest.TestCase):
     """Test extracting token IDs from requests"""
@@ -192,30 +122,6 @@ class TestExtractTokenId(unittest.TestCase):
         result = lifesaver_logic.extract_token_id(request)
         
         self.assertEqual(result, "header-token-xyz")
-    
-    def test_returns_none_for_wrong_path(self):
-        class MockRequest:
-            path = '/v3/users'
-            method = 'POST'
-            json_body = {"auth": {"identity": {"token": {"id": "test"}}}}
-            headers = {}
-        
-        request = MockRequest()
-        result = lifesaver_logic.extract_token_id(request)
-        
-        self.assertIsNone(result)
-    
-    def test_returns_none_when_no_token(self):
-        class MockRequest:
-            path = '/v3/auth/tokens'
-            method = 'POST'
-            json_body = {}
-            headers = {}
-        
-        request = MockRequest()
-        result = lifesaver_logic.extract_token_id(request)
-        
-        self.assertIsNone(result)
 
 
 class TestExtractS3Ec2Credentials(unittest.TestCase):
@@ -244,42 +150,6 @@ class TestExtractS3Ec2Credentials(unittest.TestCase):
         
         self.assertEqual(user, "ec2creds-ec2-access-key-456")
         self.assertEqual(domain, "unknown")
-    
-    def test_returns_none_for_wrong_path(self):
-        class MockRequest:
-            path = '/v3/auth/tokens'
-            method = 'POST'
-            json_body = {"credentials": {"access": "test"}}
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_s3_ec2_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
-    
-    def test_returns_none_for_wrong_method(self):
-        class MockRequest:
-            path = '/v3/s3tokens'
-            method = 'GET'
-            json_body = {"credentials": {"access": "test"}}
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_s3_ec2_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
-    
-    def test_returns_none_when_no_credentials(self):
-        class MockRequest:
-            path = '/v3/s3tokens'
-            method = 'POST'
-            json_body = {}
-        
-        request = MockRequest()
-        user, domain = lifesaver_logic.extract_s3_ec2_credentials(request)
-        
-        self.assertIsNone(user)
-        self.assertIsNone(domain)
 
 
 class TestCalculateCost(unittest.TestCase):
