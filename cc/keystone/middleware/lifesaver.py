@@ -67,7 +67,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         user = None
         domain = None
-        token_id = None
 
         try:
             user, domain = logic.extract_password_auth_credentials(request)
