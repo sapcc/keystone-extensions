@@ -19,7 +19,7 @@ import unittest
 import requests
 import os
 import time
-import json
+import memcache
 
 
 class TestLifesaverE2E(unittest.TestCase):
@@ -30,14 +30,14 @@ class TestLifesaverE2E(unittest.TestCase):
         """Set up test environment - check if Keystone is running"""
         cls.auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
         cls.admin_user = os.getenv('OS_USERNAME', 'admin')
-        cls.admin_password = os.getenv('OS_PASSWORD', 'secret')
+        cls.admin_password = os.getenv('OS_PASSWORD', 's3cr3t')
         cls.domain = os.getenv('OS_USER_DOMAIN_NAME', 'Default')
         cls.project = os.getenv('OS_PROJECT_NAME', 'admin')
         cls.project_domain = os.getenv('OS_PROJECT_DOMAIN_NAME', 'Default')
-
-        import memcache
-        mc = memcache.Client(['127.0.0.1:11211'])
-        mc.flush_all()
+        cls.project_domain_id = os.getenv('OS_PROJECT_DOMAIN_ID', 'default')
+        cls.user_domain_id = os.getenv('OS_USER_DOMAIN_ID', 'default')
+        cls.mc = memcache.Client(['127.0.0.1:11211'])
+        cls.mc.flush_all()
         time.sleep(1)  # Give it a moment
         
         # Check if Keystone is running and accessible
@@ -78,14 +78,14 @@ class TestLifesaverE2E(unittest.TestCase):
                         "user": {
                             "name": self.admin_user,
                             "password": self.admin_password,
-                            "domain": {"name": self.domain}
+                            "domain": {"id": self.user_domain_id}
                         }
                     }
                 },
                 "scope": {
                     "project": {
                         "name": self.project,
-                        "domain": {"name": self.project_domain}
+                        "domain": {"id": self.project_domain_id}
                     }
                 }
             }
@@ -266,8 +266,6 @@ class TestLifesaverE2E(unittest.TestCase):
         print("\n" + "="*70)
         print("TEST: Rate limiting across different authentication methods")
         print("="*70)
-        
-        # Create a revoked token for POST token authentication test
         print("\nPreparing test data...")
         revoked_token = self._create_revoked_token()
         if not revoked_token:
@@ -299,7 +297,7 @@ class TestLifesaverE2E(unittest.TestCase):
                                 "user": {
                                     "name": "test_user_pwd_names",
                                     "password": "wrong_password",
-                                    "domain": {"name": self.domain}
+                                    "domain": {"id": self.user_domain_id}
                                 }
                             }
                         }
@@ -400,6 +398,8 @@ class TestLifesaverE2E(unittest.TestCase):
         
         # Test each authentication method
         for scenario in scenarios:
+            self.mc.flush_all()
+            time.sleep(0.5)  # Give memcache a moment to complete flush
             with self.subTest(auth_method=scenario["name"]):
                 self._test_auth_method_rate_limiting(scenario)
     
@@ -480,7 +480,7 @@ class TestLifesaverE2E(unittest.TestCase):
                         "user": {
                             "name": test_user,
                             "password": "wrong_password",
-                            "domain": {"name": self.domain}
+                            "domain": {"id": self.user_domain_id}
                         }
                     }
                 }
