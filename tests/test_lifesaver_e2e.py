@@ -22,8 +22,107 @@ import time
 import memcache
 
 
+# Payloads
+
+def password_auth_payload(username, password, domain_id):
+    """Create a password authentication payload"""
+    return {
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "name": username,
+                        "password": password,
+                        "domain": {"id": domain_id}
+                    }
+                }
+            }
+        }
+    }
+
+
+def token_auth_payload(token_id):
+    """Create a token authentication payload"""
+    return {
+        "auth": {
+            "identity": {
+                "methods": ["token"],
+                "token": {"id": token_id}
+            }
+        }
+    }
+
+
+def app_credential_payload(app_cred_id, app_cred_secret):
+    """Create an application credential authentication payload"""
+    return {
+        "auth": {
+            "identity": {
+                "methods": ["application_credential"],
+                "application_credential": {
+                    "id": app_cred_id,
+                    "secret": app_cred_secret
+                }
+            }
+        }
+    }
+
+
+def s3_credentials_payload(access_key, secret_key, token=""):
+    """Create an S3 credentials payload"""
+    return {
+        "credentials": {
+            "access": access_key,
+            "secret": secret_key,
+            "token": token
+        }
+    }
+
+
+def ec2_credentials_payload(access_key, secret_key, signature=""):
+    """Create an EC2 credentials payload"""
+    return {
+        "credentials": {
+            "access": access_key,
+            "secret": secret_key,
+            "signature": signature
+        }
+    }
+
+
+def scoped_password_auth_payload(username, password, user_domain_id, project_name, project_domain_id):
+    """Create a scoped password authentication payload"""
+    return {
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "name": username,
+                        "password": password,
+                        "domain": {"id": user_domain_id}
+                    }
+                }
+            },
+            "scope": {
+                "project": {
+                    "name": project_name,
+                    "domain": {"id": project_domain_id}
+                }
+            }
+        }
+    }
+
+
+# Test Classes
+
 class TestLifesaverE2E(unittest.TestCase):
     """End-to-end tests against real Keystone instance with Lifesaver middleware"""
+    
+    # Configuration constants
+    MAX_RATE_LIMIT_ATTEMPTS = 50
+    REFILL_WAIT_SECONDS = 20
     
     @classmethod
     def setUpClass(cls):
@@ -36,11 +135,21 @@ class TestLifesaverE2E(unittest.TestCase):
         cls.project_domain = os.getenv('OS_PROJECT_DOMAIN_NAME', 'Default')
         cls.project_domain_id = os.getenv('OS_PROJECT_DOMAIN_ID', 'default')
         cls.user_domain_id = os.getenv('OS_USER_DOMAIN_ID', 'default')
+        
+        # Set up memcache connection
         cls.mc = memcache.Client(['127.0.0.1:11211'])
         cls.mc.flush_all()
-        time.sleep(1)  # Give it a moment
+        time.sleep(1)
         
-        # Check if Keystone is running and accessible
+        # Check if Keystone is running
+        cls._verify_keystone_available()
+        
+        print(f"\n✓ Keystone is running at {cls.auth_url}")
+        print(f"  Testing with user: {cls.admin_user}@{cls.domain}")
+    
+    @classmethod
+    def _verify_keystone_available(cls):
+        """Verify Keystone is running and accessible"""
         try:
             response = requests.get(cls.auth_url, timeout=5)
             if response.status_code not in [200, 300]:
@@ -49,13 +158,7 @@ class TestLifesaverE2E(unittest.TestCase):
                     f"Got status {response.status_code}"
                 )
         except requests.exceptions.RequestException as e:
-            raise unittest.SkipTest(
-                f"Keystone not available at {cls.auth_url}. "
-                f"Error: {e}\n"
-            )
-        
-        print(f"\n Keystone is running at {cls.auth_url}")
-        print(f"Testing with user: {cls.admin_user}@{cls.domain}")
+            raise unittest.SkipTest(f"Keystone not available at {cls.auth_url}. Error: {e}")
     
     def setUp(self):
         """Set up each test"""
@@ -68,34 +171,26 @@ class TestLifesaverE2E(unittest.TestCase):
         """Clean up after each test"""
         self.session.close()
     
+    # Helpers
+
+    def _make_request(self, method, endpoint, payload=None, headers=None):
+        """Make an HTTP request and return the response"""
+        if method == 'POST':
+            return self.session.post(endpoint, json=payload, headers=headers, verify=False)
+        elif method == 'GET':
+            return self.session.get(endpoint, headers=headers, verify=False)
+        elif method == 'DELETE':
+            return self.session.delete(endpoint, headers=headers, verify=False)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+    
     def _get_admin_token(self):
-        """Get a valid admin token for setup/teardown"""
-        auth_data = {
-            "auth": {
-                "identity": {
-                    "methods": ["password"],
-                    "password": {
-                        "user": {
-                            "name": self.admin_user,
-                            "password": self.admin_password,
-                            "domain": {"id": self.user_domain_id}
-                        }
-                    }
-                },
-                "scope": {
-                    "project": {
-                        "name": self.project,
-                        "domain": {"id": self.project_domain_id}
-                    }
-                }
-            }
-        }
-        
-        response = self.session.post(
-            f"{self.auth_url}/auth/tokens",
-            json=auth_data,
-            verify=False
+        """Get a valid admin token"""
+        payload = scoped_password_auth_payload(
+            self.admin_user, self.admin_password, self.user_domain_id,
+            self.project, self.project_domain_id
         )
+        response = self._make_request('POST', f"{self.auth_url}/auth/tokens", payload)
         
         if response.status_code == 201:
             return response.headers.get('X-Subject-Token')
@@ -107,453 +202,179 @@ class TestLifesaverE2E(unittest.TestCase):
         if not admin_token:
             return None
         
-        # Validate token to get user info
-        response = self.session.get(
+        response = self._make_request(
+            'GET',
             f"{self.auth_url}/auth/tokens",
-            headers={
-                'X-Auth-Token': admin_token,
-                'X-Subject-Token': admin_token
-            },
-            verify=False
+            headers={'X-Auth-Token': admin_token, 'X-Subject-Token': admin_token}
         )
         
         if response.status_code == 200:
-            token_data = response.json()
-            user_id = token_data.get('token', {}).get('user', {}).get('id')
-            return user_id
-        
+            return response.json().get('token', {}).get('user', {}).get('id')
         return None
     
-    def _revoke_token(self, admin_token, token_to_revoke):
-        """Revoke a token using DELETE request"""
-        headers = {
-            'X-Auth-Token': admin_token,           # Valid token for authentication
-            'X-Subject-Token': token_to_revoke     # Token to revoke
-        }
-        
-        response = self.session.delete(
-            f"{self.auth_url}/auth/tokens",
-            headers=headers,
-            verify=False
-        )
-        
-        return response.status_code == 204
-    
-    def _create_revoked_token(self):
-        """Create a token and immediately revoke it for testing
-        
-        Returns a revoked token that:
-        - Is properly formatted (so Lifesaver can extract user)
-        - Will fail authentication (401 error)
-        - Triggers rate limiting
+    def _create_app_credential(self):
         """
-        # Step 1: Get admin token for authentication
-        admin_token = self._get_admin_token()
-        if not admin_token:
-            return None
-        
-        # Step 2: Create a second token that we'll revoke
-        token_to_revoke = self._get_admin_token()
-        if not token_to_revoke:
-            return None
-        
-        # Step 3: Revoke the second token
-        revoked = self._revoke_token(admin_token, token_to_revoke)
-        
-        if revoked:
-            print(f"  [Token Helper] Created and revoked token: {token_to_revoke[:20]}...")
-            return token_to_revoke
-        else:
-            print(f"  [Token Helper] Failed to revoke token")
-            return None
-    
-    def _create_test_tokens_for_get(self):
-        """Create both a revoked token and a valid auth token for GET tests
-        
-        The GET /v3/auth/tokens endpoint requires:
-        - X-Auth-Token: A valid token to authorize the request
-        - X-Subject-Token: The token to validate (we use revoked one)
+        Create a real application credential for testing.
         
         Returns:
-            tuple: (revoked_token, valid_auth_token) or (None, None) if failed
+            tuple: (app_credential_id, app_credential_secret)
+        
+        Note: Use the real ID with a WRONG secret to trigger 401 errors
+        while still allowing the middleware to extract and track the credential ID.
         """
-        # Step 1: Get admin token for operations
         admin_token = self._get_admin_token()
         if not admin_token:
-            return None, None
-        
-        # Step 2: Create token to revoke
-        token_to_revoke = self._get_admin_token()
-        if not token_to_revoke:
-            return None, None
-        
-        # Step 3: Revoke the second token
-        revoked = self._revoke_token(admin_token, token_to_revoke)
-        if not revoked:
-            print(f"  [Token Helper] Failed to revoke token")
-            return None, None
-        
-        # Step 4: Get a fresh valid token for X-Auth-Token
-        valid_auth_token = self._get_admin_token()
-        if not valid_auth_token:
-            return None, None
-        
-        print(f"  [Token Helper] Created revoked token: {token_to_revoke[:20]}...")
-        print(f"  [Token Helper] Created valid auth token: {valid_auth_token[:20]}...")
-        
-        return token_to_revoke, valid_auth_token
-    
-    def _create_expired_app_credential(self):
-        """Create an application credential that expires in 1 second
-        
-        Returns:
-            tuple: (app_cred_id, app_cred_secret) or (None, None) if failed
-        """
-        from datetime import datetime, timedelta, timezone
-        
-        # Step 1: Get admin token and user ID
-        admin_token = self._get_admin_token()
-        if not admin_token:
-            raise unittest.SkipTest("WARNING: Could not get admin token, skipping test.")
+            raise unittest.SkipTest("Could not get admin token for app credential creation")
         
         user_id = self._get_admin_user_id()
         if not user_id:
-            raise unittest.SkipTest("WARNING: Could not get admin user ID, skipping test.")
-        
-        print(f"  [App Cred Helper] Using user_id: {user_id}")
-        
-        # Step 2: Create app credential with 1 second expiration
-        dt = datetime.now(timezone.utc) + timedelta(seconds=1)
-        expires_at = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-        # expires_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat() + 'Z'
+            raise unittest.SkipTest("Could not get admin user ID for app credential creation")
         
         payload = {
             "application_credential": {
-                "name": f"test_expired_{int(time.time())}",
+                "name": f"test_ratelimit_{int(time.time())}",
                 "description": "Test app credential for rate limiting E2E test",
-                "expires_at": expires_at,
                 "roles": [{"name": "admin"}]
             }
         }
         
-        response = self.session.post(
+        response = self._make_request(
+            'POST',
             f"{self.auth_url}/users/{user_id}/application_credentials",
-            json=payload,
-            headers={'X-Auth-Token': admin_token},
-            verify=False
+            payload,
+            headers={'X-Auth-Token': admin_token}
         )
         
         if response.status_code == 201:
             data = response.json()['application_credential']
-            app_cred_id = data['id']
-            app_cred_secret = data['secret']
-            
-            print(f"  [App Cred Helper] Created app credential: {app_cred_id[:20]}...")
-            print(f"  [App Cred Helper] Expires at: {expires_at}")
-            print(f"  [App Cred Helper] Waiting 2 seconds for expiration...")
-            
-            # Step 3: Wait 2 seconds for it to expire
-            time.sleep(2)
-            
-            print(f"  [App Cred Helper] App credential should now be expired!")
-            return app_cred_id, app_cred_secret
-        else:
-            raise unittest.SkipTest(f"WARNING: Failed to create app credential: {response.text}")
+            print(f"  [App Cred Helper] Created app credential: {data['id'][:20]}...")
+            return data['id'], data['secret']
         
+        raise unittest.SkipTest(f"Failed to create app credential: {response.text}")
     
-    def test_rate_limiting_across_auth_methods(self):
-        """Test that rate limiting works for all authentication methods"""
-        print("\n" + "="*70)
-        print("TEST: Rate limiting across different authentication methods")
-        print("="*70)
-        print("\nPreparing test data...")
-        revoked_token = self._create_revoked_token()
-        if not revoked_token:
-            raise unittest.SkipTest("WARNING: Could not create revoked token, skipping test.")
-        
-        # Create tokens for GET token authentication test (needs both valid and revoked)
-        revoked_token_for_get, valid_auth_token = self._create_test_tokens_for_get()
-        if not revoked_token_for_get or not valid_auth_token:
-            raise unittest.SkipTest("WARNING: Could not create tokens for GET test, skipping test.")
-        
-        # Create expired app credential
-        app_cred_id, app_cred_secret = self._create_expired_app_credential()
-        if not app_cred_id:
-            print("  [Warning] Could not create expired app credential - using fake one")
-            app_cred_id = "fake_app_cred_id_12345"
-            app_cred_secret = "fake_secret"
-        
-        # Define test scenarios for each authentication method
-        scenarios = [
-            {
-                "name": "password_auth_with_names",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/auth/tokens",
-                "payload": {
-                    "auth": {
-                        "identity": {
-                            "methods": ["password"],
-                            "password": {
-                                "user": {
-                                    "name": "test_user_pwd_names",
-                                    "password": "wrong_password",
-                                    "domain": {"id": self.user_domain_id}
-                                }
-                            }
-                        }
-                    }
-                },
-                "headers": None
-            },
-            {
-                "name": "password_auth_with_ids",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/auth/tokens",
-                "payload": {
-                    "auth": {
-                        "identity": {
-                            "methods": ["password"],
-                            "password": {
-                                "user": {
-                                    "id": "fake_user_id_12345",
-                                    "password": "wrong_password",
-                                    "domain": {"id": "fake_domain_id_67890"}
-                                }
-                            }
-                        }
-                    }
-                },
-                "headers": None
-            },
-            {
-                "name": "app_credential_auth",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/auth/tokens",
-                "payload": {
-                    "auth": {
-                        "identity": {
-                            "methods": ["application_credential"],
-                            "application_credential": {
-                                "id": app_cred_id,       # Use real expired app credential
-                                "secret": app_cred_secret
-                            }
-                        }
-                    }
-                },
-                "headers": None
-            },
-            {
-                "name": "token_auth_post_body",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/auth/tokens",
-                "payload": {
-                    "auth": {
-                        "identity": {
-                            "methods": ["token"],
-                            "token": {
-                                "id": revoked_token  # Use real revoked token
-                            }
-                        }
-                    }
-                },
-                "headers": None
-            },
-            {
-                "name": "token_auth_get_header",
-                "method": "GET",
-                "endpoint": f"{self.auth_url}/auth/tokens",
-                "payload": None,
-                "headers": {
-                    "X-Auth-Token": valid_auth_token,          # Valid token to authorize request
-                    "X-Subject-Token": revoked_token_for_get   # Revoked token to validate
-                }
-            },
-            {
-                "name": "s3_credentials",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/s3tokens",
-                "payload": {
-                    "credentials": {
-                        "access": "fake_s3_access_key",
-                        "secret": "fake_s3_secret_key",
-                        "token": "fake_s3_token"
-                    }
-                },
-                "headers": None
-            },
-            {
-                "name": "ec2_credentials",
-                "method": "POST",
-                "endpoint": f"{self.auth_url}/ec2tokens",
-                "payload": {
-                    "credentials": {
-                        "access": "fake_ec2_access_key",
-                        "secret": "fake_ec2_secret_key",
-                        "signature": "fake_signature"
-                    }
-                },
-                "headers": None
-            }
-        ]
-        
-        # Test each authentication method
-        for scenario in scenarios:
-            self.mc.flush_all()
-            time.sleep(0.5)  # Give memcache a moment to complete flush
-            with self.subTest(auth_method=scenario["name"]):
-                self._test_auth_method_rate_limiting(scenario)
-    
-    def _test_auth_method_rate_limiting(self, scenario):
-        """Helper method to test rate limiting for a specific authentication method"""
-        print(f"\nTesting: {scenario['name']}")
-        print(f"  Endpoint: {scenario['endpoint']}")
-        print(f"  Method: {scenario['method']}")
-        
-        rate_limited = False
-        attempts = 0
-        max_attempts = 50
-        
-        for i in range(max_attempts):
-            attempts = i + 1
+    def _run_until_rate_limited(self, method, endpoint, payload=None, headers=None):
+        """
+        Send requests until rate limited (429) or max attempts reached.
+        Returns (rate_limited: bool, attempts: int)
+        """
+        for i in range(self.MAX_RATE_LIMIT_ATTEMPTS):
+            response = self._make_request(method, endpoint, payload, headers)
             
-            # Make request based on method
-            if scenario['method'] == 'POST':
-                response = self.session.post(
-                    scenario['endpoint'],
-                    json=scenario['payload'],
-                    headers=scenario['headers'],
-                    verify=False
-                )
-            elif scenario['method'] == 'GET':
-                response = self.session.get(
-                    scenario['endpoint'],
-                    headers=scenario['headers'],
-                    verify=False
-                )
-            else:
-                self.fail(f"Unsupported method: {scenario['method']}")
-            
-            status = response.status_code
-            
-            # Print progress every 5 attempts
-            if attempts % 5 == 0:
-                print(f"    Attempt {attempts}: Status {status}")
-            
-            if status == 429:  # Rate limited!
-                rate_limited = True
-                print(f"Rate limited after {attempts} attempts (Status: {status})")
-                
-                # Check for Retry-After header
-                retry_after = response.headers.get('Retry-After')
-                if retry_after:
-                    print(f"Retry-After: {retry_after} seconds")
-                
-                self.assertEqual(status, 429, "Expected 429 Too Many Requests")
-                break
-            elif status in [401, 400, 404]:
-                # Expected error responses for invalid credentials
-                continue
-            else:
-                print(f"Unexpected status: {status}")
-                print(f"Response: {response.text[:200]}")
-        
-        if not rate_limited:
-            self.fail(
-                f"Rate limiting NOT triggered for {scenario['name']} "
-                f"after {max_attempts} attempts.\n"
-                f"Check Lifesaver middleware configuration."
-            )
-    
-    def test_credit_refill_over_time(self):
-        """Test that credits refill over time allowing requests again"""
-        print("\n" + "="*70)
-        print("TEST: Credit refill over time")
-        print("="*70)
-        
-        # Use a unique test user to avoid interference with other tests
-        test_user = f"test_refill_user_{int(time.time())}"
-        auth_data = {
-            "auth": {
-                "identity": {
-                    "methods": ["password"],
-                    "password": {
-                        "user": {
-                            "name": test_user,
-                            "password": "wrong_password",
-                            "domain": {"id": self.user_domain_id}
-                        }
-                    }
-                }
-            }
-        }
-        
-        print(f"\nPhase 1: Exhausting credits for user {test_user}...")
-        
-        # Phase 1: Exhaust credits
-        rate_limited = False
-        for i in range(50):
-            response = self.session.post(
-                f"{self.auth_url}/auth/tokens",
-                json=auth_data,
-                verify=False
-            )
+            if (i + 1) % 5 == 0:
+                print(f"    Attempt {i + 1}: Status {response.status_code}")
             
             if response.status_code == 429:
-                rate_limited = True
-                print(f"[+] Rate limited after {i + 1} attempts")
-                break
+                print(f"    Rate limited after {i + 1} attempts")
+                return True, i + 1
+        
+        return False, self.MAX_RATE_LIMIT_ATTEMPTS
+    
+    # Tests
+
+    def test_rate_limiting_across_auth_methods(self):
+        """
+        Test that rate limiting works for all authentication methods.
+        
+        Each scenario tests a DIFFERENT credential extraction path in the middleware:
+        - password_auth: Extracts username from password auth body
+        - token_auth_body: Extracts token ID from token auth body  
+        - token_auth_header: Extracts token ID from X-Subject-Token header
+        - app_credential: Extracts app credential ID from body
+        - s3_credentials: Extracts S3 access key from body
+        - ec2_credentials: Extracts EC2 access key from body
+        
+        We don't test different failure reasons (expired, revoked, invalid) separately
+        because the middleware treats all 4xx responses equally.
+        """
+        print("\n" + "=" * 60)
+        print("TEST: Rate limiting across different authentication methods")
+        print("=" * 60)
+        
+        valid_auth_token = self._get_admin_token()
+        if not valid_auth_token:
+            self.skipTest("Could not get admin token for header tests")
+        
+        print("\nPreparing test data...")
+        self._app_cred_id, _ = self._create_app_credential()
+        
+        scenarios = [
+            ("password_auth", "POST", f"{self.auth_url}/auth/tokens",
+             password_auth_payload("test_user", "wrong_password", self.user_domain_id), None),
+            
+            ("token_auth_body", "POST", f"{self.auth_url}/auth/tokens",
+             token_auth_payload("invalid-token-id"), None),
+            
+            ("token_auth_header", "GET", f"{self.auth_url}/auth/tokens",
+             None, {"X-Auth-Token": valid_auth_token, "X-Subject-Token": "invalid-token"}),
+            
+            ("app_credential", "POST", f"{self.auth_url}/auth/tokens",
+             app_credential_payload(self._app_cred_id, "wrong-secret-for-testing"), None),
+            
+            ("s3_credentials", "POST", f"{self.auth_url}/s3tokens",
+             s3_credentials_payload("fake_s3_access", "fake_s3_secret"), None),
+            
+            ("ec2_credentials", "POST", f"{self.auth_url}/ec2tokens",
+             ec2_credentials_payload("fake_ec2_access", "fake_ec2_secret", "fake_sig"), None),
+        ]
+        
+        # Test each scenario
+        for name, method, endpoint, payload, headers in scenarios:
+            with self.subTest(auth_method=name):
+                print(f"\nTesting: {name}")
+                
+                # Reset rate limit state
+                self.mc.flush_all()
+                time.sleep(0.5)
+                
+                rate_limited, attempts = self._run_until_rate_limited(method, endpoint, payload, headers)
+                
+                self.assertTrue(
+                    rate_limited,
+                    f"Rate limiting NOT triggered for {name} after {attempts} attempts"
+                )
+    
+    def test_credit_refill_over_time(self):
+        """Test that credits refill over time allowing requests again
+        You might need to check what is configured in keystone instance as
+        refill_seconds and adjust REFILL_WAIT_SECONDS accordingly.
+        """
+        print("\n" + "=" * 60)
+        print("TEST: Credit refill over time")
+        print("=" * 60)
+        
+        # Use unique user to avoid interference
+        test_user = f"test_refill_user_{int(time.time())}"
+        payload = password_auth_payload(test_user, "wrong_password", self.user_domain_id)
+        endpoint = f"{self.auth_url}/auth/tokens"
+        
+        # Phase 1: Exhaust credits
+        print(f"\nPhase 1: Exhausting credits for user {test_user}...")
+        rate_limited, _ = self._run_until_rate_limited('POST', endpoint, payload)
         
         if not rate_limited:
             self.skipTest("Could not trigger rate limiting in phase 1")
         
-        # Verify we're still rate limited
-        response = self.session.post(
-            f"{self.auth_url}/auth/tokens",
-            json=auth_data,
-            verify=False
-        )
-        self.assertEqual(response.status_code, 429, 
-                        "Should still be rate limited immediately after")
+        # Verify still rate limited
+        response = self._make_request('POST', endpoint, payload)
+        self.assertEqual(response.status_code, 429, "Should still be rate limited immediately after")
         
-        # Phase 2: Wait for credit refill
-        # Default refill is usually 60 seconds, wait 70 to be safe
-        refill_wait_time = 70  # seconds
-        print(f"\nPhase 2: Waiting {refill_wait_time} seconds for credit refill...")
-        print("(This tests that credits are actually refilled over time)")
-        
-        # Show countdown
-        for remaining in range(refill_wait_time, 0, -10):
+        # Phase 2: Wait for refill
+        print(f"\nPhase 2: Waiting {self.REFILL_WAIT_SECONDS} seconds for credit refill...")
+        for remaining in range(self.REFILL_WAIT_SECONDS, 0, -10):
             print(f"  {remaining} seconds remaining...")
             time.sleep(10)
         
+        # Phase 3: Verify refill
         print("\nPhase 3: Testing if credits have been refilled...")
-        
-        # Phase 3: Try again - should work now (get 401 instead of 429)
-        response = self.session.post(
-            f"{self.auth_url}/auth/tokens",
-            json=auth_data,
-            verify=False
-        )
-        
+        response = self._make_request('POST', endpoint, payload)
         status = response.status_code
-        print(f"  Response status: {status}")
         
         if status == 401:
-            print("[+] Credits refilled! Now getting 401 (auth failed) instead of 429")
-            print("This means rate limiting was lifted after credit refill")
+            print("  Credits refilled! Now getting 401 instead of 429")
         elif status == 429:
-            # Still rate limited - maybe refill time is configured differently
-            print("️[-] Still rate limited after waiting")
-            print("    Check refill_seconds configuration in Lifesaver middleware")
-            print("    The test waited 70 seconds, but refill might be configured differently")
-            # Don't fail the test, just warn
-            self.skipTest(f"Still rate limited after {refill_wait_time}s - check refill_seconds config")
-        else:
-            print(f"️Unexpected status: {status}")
+            self.skipTest(f"Still rate limited after {self.REFILL_WAIT_SECONDS}s - check refill_seconds config")
         
-        # we should NOT be rate limited anymore
-        self.assertNotEqual(status, 429, 
-                           f"Should not be rate limited after {refill_wait_time}s refill period")
+        self.assertNotEqual(status, 429, "Should not be rate limited after refill period")
 
 
 class TestLifesaverE2ESetup(unittest.TestCase):
@@ -563,31 +384,30 @@ class TestLifesaverE2ESetup(unittest.TestCase):
         """Check that required environment variables are accessible"""
         auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
         self.assertIsNotNone(auth_url, "OS_AUTH_URL should be set")
-        print(f"\nUsing Keystone at: {auth_url}")
+        print(f"\n  Using Keystone at: {auth_url}")
     
     def test_keystone_is_accessible(self):
         """Verify Keystone is running and accessible"""
         auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
         try:
             response = requests.get(auth_url, timeout=5, verify=False)
-            self.assertIn(response.status_code, [200, 300], 
+            self.assertIn(response.status_code, [200, 300],
                          f"Keystone should respond with 200/300, got {response.status_code}")
-            print(f"Keystone is accessible (status: {response.status_code})")
+            print(f"  Keystone is accessible (status: {response.status_code})")
         except requests.exceptions.RequestException as e:
             self.fail(f"Cannot connect to Keystone at {auth_url}: {e}")
 
 
 if __name__ == '__main__':
-    print("\n" + "="*70)
+    print("\n" + "=" * 60)
     print("Lifesaver Middleware - End-to-End Tests")
-    print("="*70)
+    print("=" * 60)
     print("\nThese tests run against a REAL Keystone instance.")
     print("Make sure you're running against a TEST instance!")
     print("\nEnvironment:")
     print(f"  OS_AUTH_URL: {os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')}")
     print(f"  OS_USERNAME: {os.getenv('OS_USERNAME', 'admin')}")
     print(f"  OS_USER_DOMAIN_NAME: {os.getenv('OS_USER_DOMAIN_NAME', 'Default')}")
-    print("="*70 + "\n")
-    input("Press Enter to continue or Ctrl+C to abort...")
+    print("=" * 60 + "\n")
     
     unittest.main(verbosity=2)
