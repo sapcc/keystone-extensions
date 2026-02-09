@@ -365,5 +365,59 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
     
 
 
+class TestHashTokenId(unittest.TestCase):
+    """Test the hash_token_id function"""
+    
+    def test_returns_consistent_hash(self):
+        """Same input always produces the same output"""
+        result1 = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+        result2 = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+        
+        self.assertEqual(result1, result2)
+    
+    def test_different_tokens_produce_different_hashes(self):
+        """Different token IDs produce different hashes"""
+        result1 = lifesaver_logic.hash_token_id('token-1', 'secret-key')
+        result2 = lifesaver_logic.hash_token_id('token-2', 'secret-key')
+        
+        self.assertNotEqual(result1, result2)
+    
+    def test_different_keys_produce_different_hashes(self):
+        """Different secret keys produce different hashes"""
+        result1 = lifesaver_logic.hash_token_id('test-token', 'key-1')
+        result2 = lifesaver_logic.hash_token_id('test-token', 'key-2')
+        
+        self.assertNotEqual(result1, result2)
+    
+    def test_default_sha512_produces_128_char_hash(self):
+        """SHA-512 (default) produces a 128-character hex digest"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+        
+        self.assertEqual(len(result), 128)
+    
+    def test_sha256_produces_64_char_hash(self):
+        """SHA-256 produces a 64-character hex digest"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key', hash_function='sha256')
+        
+        self.assertEqual(len(result), 64)
+    
+    def test_raises_error_when_secret_key_is_none(self):
+        """Raises ValueError when secret key is None"""
+        with self.assertRaises(ValueError):
+            lifesaver_logic.hash_token_id('test-token', None)
+    
+    def test_raises_error_when_secret_key_is_empty(self):
+        """Raises ValueError when secret key is empty string"""
+        with self.assertRaises(ValueError):
+            lifesaver_logic.hash_token_id('test-token', '')
+    
+    def test_returns_hex_string(self):
+        """Returns a valid hexadecimal string"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+        
+        # Should only contain hex characters
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
+
+
 if __name__ == '__main__':
     unittest.main()
