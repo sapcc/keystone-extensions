@@ -19,6 +19,7 @@ import memcache
 from oslo_config import cfg
 
 from . import score
+from .lifesaver_logic import hash_token_id
 
 CONF = keystone.conf.CONF
 
@@ -87,3 +88,12 @@ class LifesaverUtils(object):
 
     def normalize(self, string=''):
         return string.strip().upper()
+
+    def hash_token_id(self, token_id: str) -> str:
+        secret_key = CONF.security_compliance.invalid_password_hash_secret_key
+        configured_hash_function = CONF.security_compliance.invalid_password_hash_function
+        return hash_token_id(
+            token_id,
+            secret_key=secret_key,
+            hash_function=configured_hash_function
+        )

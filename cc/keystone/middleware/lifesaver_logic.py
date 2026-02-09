@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import hmac
 
 def extract_password_auth_credentials(request):
     """
@@ -200,6 +201,30 @@ def extract_from_authentication_request(request):
                         domain = domain_info.get('name', None)
 
     return user, domain
+
+
+def hash_token_id(token_id: str, secret_key: str, hash_function: str = 'sha512') -> str:
+    """Hash a token ID using HMAC.
+    
+    Args:
+        token_id: The token ID to hash.
+        secret_key: The secret key for HMAC.
+        hash_function: The hash algorithm to use (default: sha512).
+    
+    Returns:
+        The hexadecimal digest of the HMAC hash.
+    
+    Raises:
+        ValueError: If secret_key is None or empty.
+    """
+    if not secret_key:
+        raise ValueError('Secret key must be provided')
+    
+    return hmac.new(
+        key=secret_key.encode('utf-8'),
+        msg=token_id.encode('utf-8'),
+        digestmod=hash_function
+    ).hexdigest()
 
 
 def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_config):

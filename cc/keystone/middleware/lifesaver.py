@@ -12,12 +12,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+
 from json.decoder import JSONDecodeError
 
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
-from keystone.token.providers import fernet
 
 from . import lifesaver_utils as utils
 from . import lifesaver_logic as logic
@@ -35,8 +35,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         self.logger = log.getLogger(__name__)
         self.app = app
         self.utils = utils.LifesaverUtils(conf)
-        self.fernet_provider = fernet.Provider()
-
 
         # default responses
         self.ratelimit_response = response.RateLimitExceededResponse()
@@ -54,51 +52,44 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.debug('refill-amount is {0}'.format(self.utils.refill_amount))
             self.logger.debug('status-costs are {0}'.format(self.utils.status_cost))
 
-    def get_user(self, request):
+    def get_subject(self, request):
         """
-        Tries to fetch user and its domain from the request
+        Tries to fetch the rate-limit subject and its domain from the request.
+        The subject can be a user, token, or credential identifier.
         :param request: the clients request
-        :return: a dict with 'user' and 'domain'
+        :return: a dict with 'subject' and 'domain'
         """
 
         # shortcut for version discovery request
         if '/v3/' == request.path:
             return None
 
-        user = None
+        subject = None
         domain = None
 
         try:
-            user, domain = logic.extract_password_auth_credentials(request)
-            if not user:
-                user = logic.extract_app_credential(request)
-            if not user:
+            subject, domain = logic.extract_password_auth_credentials(request)
+            if not subject:
+                subject = logic.extract_app_credential(request)
+            if not subject:
                 token_id = logic.extract_token_id(request)
                 if token_id:
-                    # use fernet provider to decode token and extract user id and domain
-                    try:
-                        (user_id, methods, audit_ids, system, domain, project_id,
-                trust_id, federated_group_ids, identity_provider_id,
-                protocol_id, access_token_id, app_cred_id, thumbprint,
-                issued_at, expires_at) = self.fernet_provider.validate_token(token_id)
-                        if user_id:
-                            user = 'ftokencreds-' + user_id
-                    except Exception as e:
-                        self.logger.error("Could not validate token ...%s: %s" % (token_id[:8], str(e)))
-            if not user:
-                user, domain = logic.extract_s3_ec2_credentials(request)
-            if not user:
-                user, domain = logic.extract_from_authentication_request(request)
+                    token_hash = self.utils.hash_token_id(token_id)
+                    subject = 'ftokencreds-' + token_hash
+            if not subject:
+                subject, domain = logic.extract_s3_ec2_credentials(request)
+            if not subject:
+                subject, domain = logic.extract_from_authentication_request(request)
         except Exception as e:
             self.logger.error("Could not extract credentials from request: %s %s %s" % (
                 request.method, request.path, e))
 
-        if not user:
-            user = ''
+        if not subject:
+            subject = ''
         if not domain:
             domain = ''
 
-        return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)} 
+        return {'subject': self.utils.normalize(subject), 'domain': self.utils.normalize(domain)}
 
     def process_request(self, request):
         return self.verify_request(request)
@@ -106,13 +97,13 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
 
-    def get_costs(self, request, response, item, item_score):
+    def get_costs(self, request, response, subject, subject_score):
         status = response.status_code
         cost = 0
         # determine cost based on response status
         if status >= 400:
             # check prefix to decide which cost table to use
-            if item.startswith("FTOKENCREDS-"):
+            if subject.startswith("FTOKENCREDS-"):
                 cost = self.utils.token_cost['default']
                 if str(status) in self.utils.token_cost:
                     cost = self.utils.token_cost[str(status)]
@@ -121,22 +112,22 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                 if str(status) in self.utils.status_cost:
                     cost = self.utils.status_cost[str(status)]
 
-        # deduct user credit ?
+        # deduct subject credit ?
         if int(cost) > 0:
             # mark request as processed
-            request.environ['lifesaver'] = item
-            item_score.reduce(int(cost))
+            request.environ['lifesaver'] = subject
+            subject_score.reduce(int(cost))
             # update score metadata in case the configuration has changed
-            if item_score.credit != self.utils.credit:
-                item_score.credit = self.utils.credit
-            if item_score.refill_time != self.utils.refill_time:
-                item_score.refill_time = self.utils.refill_time
-            if item_score.refill_amount != self.utils.refill_amount:
-                item_score.refill_amount = self.utils.refill_amount
+            if subject_score.credit != self.utils.credit:
+                subject_score.credit = self.utils.credit
+            if subject_score.refill_time != self.utils.refill_time:
+                subject_score.refill_time = self.utils.refill_time
+            if subject_score.refill_amount != self.utils.refill_amount:
+                subject_score.refill_amount = self.utils.refill_amount
 
-            self.utils.set_score(item, item_score)
+            self.utils.set_score(subject, subject_score)
             self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
-            item, item_score.get(), request.method, request.path,
+            subject, subject_score.get(), request.method, request.path,
             status))
 
 
@@ -156,33 +147,33 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         if 'lifesaver' in request.environ:
             return result
 
-        credentials = self.get_user(request)
+        credentials = self.get_subject(request)
         if credentials:
             domain = credentials['domain']
             if domain and credentials['domain'] in self.utils.domain_allowlist:
                 return result
 
-            user = credentials['user']
-            if user:
-                # request from allowlisted user?
-                if credentials['user'] in self.utils.user_allowlist:
+            subject = credentials['subject']
+            if subject:
+                # request from allowlisted subject?
+                if credentials['subject'] in self.utils.user_allowlist:
                     return result
 
-                # request from blocklisted user?
-                if credentials['user'] in self.utils.user_blocklist:
-                    self.logger.info("Request from blocklisted user %s rejected" % user)
+                # request from blocklisted subject?
+                if credentials['subject'] in self.utils.user_blocklist:
+                    self.logger.info("Request from blocklisted subject %s rejected" % subject)
                     return self.blocklist_response
 
-                user_score = self.utils.get_score(credentials['user'])
+                subject_score = self.utils.get_score(credentials['subject'])
 
-                if user_score.get() == 0:
-                    self.logger.info("Blocking request %s %s, since user %s %s has no credit left" % (
-                    request.method, request.path, user, domain))
+                if subject_score.get() == 0:
+                    self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
+                    request.method, request.path, subject[:30], domain))
                     return self.ratelimit_response
 
                 if response:
                     self.logger.info("Response exists, calling calculate_score")
-                    self.get_costs(request, response, user, user_score)
+                    self.get_costs(request, response, subject, subject_score)
                 else:
                     self.logger.info("No response, skipping calculate_score")
 
