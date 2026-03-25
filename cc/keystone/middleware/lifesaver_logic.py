@@ -14,6 +14,9 @@
 
 import hmac
 
+FTOKENCREDS_PREFIX = 'FTOKENCREDS-'
+
+
 def extract_password_auth_credentials(request):
     """
     Extract user credentials from password authentication request body.
@@ -142,9 +145,6 @@ def extract_s3_ec2_credentials(request):
             # Failed to parse JSON body
             return None, None
 
-        if request.path not in ['/v3/s3tokens', '/v3/ec2tokens']:
-            return None, None
-        
         # The order is taken from EC2_S3_Resource.py in keystone
         credentials = (
             body.get('credentials') or
@@ -245,7 +245,7 @@ def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_
         return 0
     
     # Determine which cost table to use based on user prefix
-    if user_identifier.upper().startswith("FTOKENCREDS-"):
+    if user_identifier.startswith(FTOKENCREDS_PREFIX):
         cost_table = token_cost_config
     else:
         cost_table = status_cost_config

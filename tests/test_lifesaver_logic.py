@@ -167,7 +167,7 @@ class TestCalculateCost(unittest.TestCase):
         status_cost = {'default': 1, '404': 0}
         token_cost = {'default': 1, '404': 10}
         
-        cost = lifesaver_logic.calculate_cost(404, 'FTOKENCREDS-USER-123', status_cost, token_cost)
+        cost = lifesaver_logic.calculate_cost(404, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER-123', status_cost, token_cost)
         
         self.assertEqual(cost, 10)
     
@@ -183,7 +183,7 @@ class TestCalculateCost(unittest.TestCase):
         status_cost = {'default': 1, '401': 10}
         token_cost = {'default': 1, '401': 15}
         
-        cost = lifesaver_logic.calculate_cost(401, 'FTOKENCREDS-USER', status_cost, token_cost)
+        cost = lifesaver_logic.calculate_cost(401, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER', status_cost, token_cost)
         
         self.assertEqual(cost, 15)
     
@@ -194,14 +194,6 @@ class TestCalculateCost(unittest.TestCase):
         cost = lifesaver_logic.calculate_cost(418, 'PASSWORD-USER', status_cost, token_cost)
         
         self.assertEqual(cost, 5)
-    
-    def test_case_insensitive_ftokencreds_check(self):
-        status_cost = {'default': 1, '404': 0}
-        token_cost = {'default': 1, '404': 10}
-        
-        # Test lowercase
-        cost = lifesaver_logic.calculate_cost(404, 'ftokencreds-user', status_cost, token_cost)
-        self.assertEqual(cost, 10)
 
 
 class TestShouldUpdateScoreMetadata(unittest.TestCase):

@@ -13,8 +13,6 @@
 # under the License.
 
 
-from json.decoder import JSONDecodeError
-
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -22,8 +20,7 @@ from oslo_middleware import base
 from . import lifesaver_utils as utils
 from . import lifesaver_logic as logic
 from . import response
-
-from webob import Request
+from .lifesaver_logic import FTOKENCREDS_PREFIX, calculate_cost, should_update_score_metadata
 
 CONF = keystone.conf.CONF
 
@@ -74,8 +71,14 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             if not subject:
                 token_id = logic.extract_token_id(request)
                 if token_id:
-                    token_hash = self.utils.hash_token_id(token_id)
-                    subject = 'ftokencreds-' + token_hash
+                    try:
+                        token_hash = self.utils.hash_token_id(token_id)
+                        subject = FTOKENCREDS_PREFIX + token_hash
+                    except ValueError:
+                        self.logger.warning(
+                            "Token rate-limiting unavailable: "
+                            "invalid_password_hash_secret_key is not configured"
+                        )
             if not subject:
                 subject, domain = logic.extract_s3_ec2_credentials(request)
             if not subject:
@@ -98,37 +101,33 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         return self.verify_request(request, response)
 
     def get_costs(self, request, response, subject, subject_score):
-        status = response.status_code
-        cost = 0
-        # determine cost based on response status
-        if status >= 400:
-            # check prefix to decide which cost table to use
-            if subject.startswith("FTOKENCREDS-"):
-                cost = self.utils.token_cost['default']
-                if str(status) in self.utils.token_cost:
-                    cost = self.utils.token_cost[str(status)]
-            else:
-                cost = self.utils.status_cost['default']
-                if str(status) in self.utils.status_cost:
-                    cost = self.utils.status_cost[str(status)]
+        cost = calculate_cost(
+            response.status_code,
+            subject,
+            self.utils.status_cost,
+            self.utils.token_cost
+        )
 
-        # deduct subject credit ?
-        if int(cost) > 0:
+        # deduct subject credit
+        if cost > 0:
             # mark request as processed
             request.environ['lifesaver'] = subject
-            subject_score.reduce(int(cost))
+            subject_score.reduce(cost)
             # update score metadata in case the configuration has changed
-            if subject_score.credit != self.utils.credit:
+            if should_update_score_metadata(
+                subject_score,
+                self.utils.credit,
+                self.utils.refill_time,
+                self.utils.refill_amount
+            ):
                 subject_score.credit = self.utils.credit
-            if subject_score.refill_time != self.utils.refill_time:
                 subject_score.refill_time = self.utils.refill_time
-            if subject_score.refill_amount != self.utils.refill_amount:
                 subject_score.refill_amount = self.utils.refill_amount
 
             self.utils.set_score(subject, subject_score)
             self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
-            subject, subject_score.get(), request.method, request.path,
-            status))
+                subject, subject_score.get(), request.method, request.path,
+                response.status_code))
 
 
     def verify_request(self, request, response=None):
