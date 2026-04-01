@@ -393,15 +393,31 @@ class TestHashTokenId(unittest.TestCase):
         
         self.assertEqual(len(result), 64)
     
-    def test_raises_error_when_secret_key_is_none(self):
-        """Raises ValueError when secret key is None"""
-        with self.assertRaises(ValueError):
+    def test_falls_back_to_hostname_when_secret_key_is_none(self):
+        """Falls back to hostname and returns a valid hash when secret key is None"""
+        result = lifesaver_logic.hash_token_id('test-token', None)
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
+
+    def test_falls_back_to_hostname_when_secret_key_is_empty(self):
+        """Falls back to hostname and returns a valid hash when secret key is empty"""
+        result = lifesaver_logic.hash_token_id('test-token', '')
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
+
+    def test_fallback_matches_explicit_hostname_key(self):
+        """Hash with missing key equals hash using hostname as key"""
+        import socket
+        result_fallback = lifesaver_logic.hash_token_id('test-token', None)
+        result_hostname = lifesaver_logic.hash_token_id('test-token', socket.getfqdn())
+        self.assertIsNotNone(result_fallback)
+        self.assertNotEqual(result_fallback, '')
+        self.assertEqual(result_fallback, result_hostname)
+
+    def test_logs_warning_when_secret_key_is_missing(self):
+        """Warning is logged when secret key is None or empty"""
+        import logging
+        with self.assertLogs('lifesaver_logic', level=logging.WARNING) as cm:
             lifesaver_logic.hash_token_id('test-token', None)
-    
-    def test_raises_error_when_secret_key_is_empty(self):
-        """Raises ValueError when secret key is empty string"""
-        with self.assertRaises(ValueError):
-            lifesaver_logic.hash_token_id('test-token', '')
+        self.assertTrue(any('invalid_password_hash_secret_key' in line for line in cm.output))
     
     def test_returns_hex_string(self):
         """Returns a valid hexadecimal string"""

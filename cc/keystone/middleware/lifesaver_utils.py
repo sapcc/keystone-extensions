@@ -90,10 +90,8 @@ class LifesaverUtils(object):
         return string.strip().upper()
 
     def hash_token_id(self, token_id: str) -> str:
-        secret_key = CONF.security_compliance.invalid_password_hash_secret_key
-        configured_hash_function = CONF.security_compliance.invalid_password_hash_function
         return hash_token_id(
             token_id,
-            secret_key=secret_key,
-            hash_function=configured_hash_function
+            secret_key=CONF.security_compliance.invalid_password_hash_secret_key,
+            hash_function=CONF.security_compliance.invalid_password_hash_function,
         )

@@ -71,14 +71,8 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             if not subject:
                 token_id = logic.extract_token_id(request)
                 if token_id:
-                    try:
-                        token_hash = self.utils.hash_token_id(token_id)
-                        subject = FTOKENCREDS_PREFIX + token_hash
-                    except ValueError:
-                        self.logger.warning(
-                            "Token rate-limiting unavailable: "
-                            "invalid_password_hash_secret_key is not configured"
-                        )
+                    token_hash = self.utils.hash_token_id(token_id)
+                    subject = FTOKENCREDS_PREFIX + token_hash
             if not subject:
                 subject, domain = logic.extract_s3_ec2_credentials(request)
             if not subject:
@@ -165,7 +159,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
                 subject_score = self.utils.get_score(credentials['subject'])
 
-                if subject_score.get() == 0:
+                if subject_score.get() <= 0:
                     self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
                     request.method, request.path, subject[:30], domain))
                     return self.ratelimit_response

@@ -13,6 +13,10 @@
 # under the License.
 
 import hmac
+import logging
+import socket
+
+LOG = logging.getLogger(__name__)
 
 FTOKENCREDS_PREFIX = 'FTOKENCREDS-'
 
@@ -205,21 +209,26 @@ def extract_from_authentication_request(request):
 
 def hash_token_id(token_id: str, secret_key: str, hash_function: str = 'sha512') -> str:
     """Hash a token ID using HMAC.
-    
+
+    If secret_key is not set, the hostname is used as a fallback and a warning
+    is logged. Token rate-limiting remains active but the hash is less secure.
+
     Args:
         token_id: The token ID to hash.
         secret_key: The secret key for HMAC.
         hash_function: The hash algorithm to use (default: sha512).
-    
+
     Returns:
         The hexadecimal digest of the HMAC hash.
-    
-    Raises:
-        ValueError: If secret_key is None or empty.
     """
     if not secret_key:
-        raise ValueError('Secret key must be provided')
-    
+        LOG.warning(
+            "security_compliance.invalid_password_hash_secret_key is not set. "
+            "Token hashing will use the hostname as a fallback secret key. "
+            "This reduces security — please configure a proper secret key."
+        )
+        secret_key = socket.getfqdn()
+
     return hmac.new(
         key=secret_key.encode('utf-8'),
         msg=token_id.encode('utf-8'),
