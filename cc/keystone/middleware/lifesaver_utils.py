@@ -74,10 +74,10 @@ class LifesaverUtils(object):
             user = user.decode("utf-8")
         return hashlib.md5(user.encode()).hexdigest()
 
-    def get_score(self, user):
+    def get_score(self, user) -> score.Score:
         key = self.get_memcache_key(user)
         score_result = self.memcached.gets(key)
-        if not score_result:
+        if score_result is None or not isinstance(score_result, score.Score):
             score_result = score.Score(self.credit, self.refill_time, self.refill_amount)
         return score_result
 

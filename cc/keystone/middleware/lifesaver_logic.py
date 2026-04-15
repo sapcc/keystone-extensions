@@ -24,81 +24,81 @@ FTOKENCREDS_PREFIX = 'FTOKENCREDS-'
 def extract_password_auth_credentials(request):
     """
     Extract user credentials from password authentication request body.
-    
+
     Args:
         request: Request object
     Returns:
         tuple: (user, domain) or (None, None) if not found
     """
-    
+    if '/v3/auth/tokens' != request.path or 'POST' != request.method:
+        return None, None
+
     try:
         body = request.json_body
     except Exception:
-        # GET requests or requests without JSON body will fail here
         return None, None
 
-    if '/v3/auth/tokens' == request.path and 'POST' == request.method:
-        if 'auth' not in body:
-            return None, None
-        
-        if 'identity' not in body['auth']:
-            return None, None
-        
-        identity = body['auth']['identity']
-        if 'password' not in identity:
-            return None, None
-        
-        if 'user' not in identity['password']:
-            return None, None
-        
-        user_data = identity['password']['user']
-        
-        # Extract user (prefer name, fallback to id with prefix)
-        user = user_data.get('name', None)
-        if not user and 'id' in user_data:
-            user = 'id-' + user_data['id']
-        
-        # Extract domain (prefer name, fallback to id)
-        domain = None
-        if 'domain' in user_data:
-            domain = user_data['domain'].get('name', None)
-            if not domain and 'id' in user_data['domain']:
-                domain = user_data['domain']['id']
-        
-        return user, domain
-    return None, None
+    if 'auth' not in body:
+        return None, None
+
+    if 'identity' not in body['auth']:
+        return None, None
+
+    identity = body['auth']['identity']
+    if 'password' not in identity:
+        return None, None
+
+    if 'user' not in identity['password']:
+        return None, None
+
+    user_data = identity['password']['user']
+
+    # Extract user (prefer name, fallback to id with prefix)
+    user = user_data.get('name', None)
+    if not user and 'id' in user_data:
+        user = 'id-' + user_data['id']
+
+    # Extract domain (prefer name, fallback to id)
+    domain = None
+    if 'domain' in user_data:
+        domain = user_data['domain'].get('name', None)
+        if not domain and 'id' in user_data['domain']:
+            domain = user_data['domain']['id']
+
+    return user, domain
 
 
 def extract_app_credential(request):
     """
     Extract application credential ID from request body.
-    
+
     Args:
         request: Request object
     Returns:
         str: Application credential ID with 'ac-' prefix, or None if not found
     """
+    if '/v3/auth/tokens' != request.path or 'POST' != request.method:
+        return None
+
     try:
         body = request.json_body
     except Exception:
-        # GET requests or requests without JSON body will fail here
         return None
-    
-    if '/v3/auth/tokens' == request.path and 'POST' == request.method:
-        if 'auth' not in body:
-            return None
-        
-        if 'identity' not in body['auth']:
-            return None
-        
-        identity = body['auth']['identity']
-        if 'application_credential' not in identity:
-            return None
-        
-        app_cred_id = identity['application_credential'].get('id', None)
-        if app_cred_id:
-            return 'ac-' + app_cred_id
-    
+
+    if 'auth' not in body:
+        return None
+
+    if 'identity' not in body['auth']:
+        return None
+
+    identity = body['auth']['identity']
+    if 'application_credential' not in identity:
+        return None
+
+    app_cred_id = identity['application_credential'].get('id', None)
+    if app_cred_id:
+        return 'ac-' + app_cred_id
+
     return None
 
 
@@ -179,16 +179,12 @@ def extract_from_authentication_request(request):
         tuple: (user, domain) or (None, None) if not found
     """
     context = request.environ
-    user = None
-    domain = None
 
     if 'KEYSTONE_AUTH_CONTEXT' not in context:
         return None, None
     # grab from request env
-    if not user:
-        user = context.get('HTTP_X_USER_NAME', None)
-    if not domain:
-        domain = context.get('HTTP_X_USER_DOMAIN_NAME', None)
+    user = context.get('HTTP_X_USER_NAME', None)
+    domain = context.get('HTTP_X_USER_DOMAIN_NAME', None)
 
     # try token info
     if not user or not domain:

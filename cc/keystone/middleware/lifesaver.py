@@ -13,6 +13,7 @@
 # under the License.
 
 
+from cc.keystone.middleware import score
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -157,7 +158,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     self.logger.info("Request from blocklisted subject %s rejected" % subject)
                     return self.blocklist_response
 
-                subject_score = self.utils.get_score(credentials['subject'])
+                subject_score: score.Score = self.utils.get_score(credentials['subject'])
 
                 if subject_score.get() <= 0:
                     self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
@@ -165,10 +166,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                     return self.ratelimit_response
 
                 if response:
-                    self.logger.info("Response exists, calling calculate_score")
                     self.get_costs(request, response, subject, subject_score)
-                else:
-                    self.logger.info("No response, skipping calculate_score")
 
         return result
 
