@@ -68,7 +68,7 @@ class UserScore(BaseApp):
     def main():
         utils = lifesaver_utils.LifesaverUtils(conf={})
         user = utils.normalize(CONF.command.user)
-        user_score = utils.get_user_score(user)
+        user_score = utils.get_score(user)
 
         print(user_score.get())
 

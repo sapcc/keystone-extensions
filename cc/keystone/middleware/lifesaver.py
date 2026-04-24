@@ -12,11 +12,18 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
+
+from . import lifesaver_logic as logic
 from . import lifesaver_utils as utils
 from . import response
+from .lifesaver_logic import calculate_cost
+from .lifesaver_logic import FTOKENCREDS_PREFIX
+from .lifesaver_logic import should_update_score_metadata
+from cc.keystone.middleware import score
 
 CONF = keystone.conf.CONF
 
@@ -44,112 +51,81 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.debug('refill-time is {0}'.format(self.utils.refill_time))
             self.logger.debug('refill-amount is {0}'.format(self.utils.refill_amount))
             self.logger.debug('status-costs are {0}'.format(self.utils.status_cost))
+            self.logger.debug('token-costs are {0}'.format(self.utils.token_cost))
 
-    def get_user(self, request):
+    def get_subject(self, request):
         """
-        Tries to fetch user and its domain from the request
+        Tries to fetch the rate-limit subject and its domain from the request.
+        The subject can be a user, token, or credential identifier.
         :param request: the clients request
-        :return: a dict with 'user' and 'domain'
+        :return: a dict with 'subject' and 'domain'
         """
 
         # shortcut for version discovery request
         if '/v3/' == request.path:
             return None
 
-        user = None
+        subject = None
         domain = None
 
         try:
-            # grab credentials from an authentication request
-            if '/v3/auth/tokens' == request.path and 'POST' == request.method:
-                body = request.json_body
-                if 'auth' in body:
-                    if 'identity' in body['auth']:
-                        if 'password' in body['auth']['identity']:
-                            if 'user' in body['auth']['identity']['password']:
-                                user = body['auth']['identity']['password']['user'].get('name', None)
-                                if not user:
-                                    user = body['auth']['identity']['password']['user'].get('id', None)
-                                    if user:
-                                        user = 'id-' + user
-                                if 'domain' in body['auth']['identity']['password']['user']:
-                                    domain = body['auth']['identity']['password']['user']['domain'].get('name', None)
-                                    if not domain:
-                                        domain = body['auth']['identity']['password']['user']['domain'].get('id', None)
-                        elif 'application_credential' in body['auth']['identity']:
-                            user = body['auth']['identity']['application_credential'].get('id', None)
-                            if user:
-                                user = 'ac-' + user
-
-            elif (('/v3/s3tokens' == request.path or
-                   '/v3/ec2tokens' == request.path) and
-                  'POST' == request.method):
-                # s3tokens/ec2tokens never contains user id, so use
-                # credential's `access` field to identify it
-                body = request.json_body
-                # the order is taken from EC2_S3_Resource.py in keystone
-                credentials = (
-                    body.get('credentials') or
-                    body.get('credential') or
-                    body.get('ec2Credentials')
-                )
-                if '/v3/s3tokens' == request.path:
-                    prefix = 's3creds'
-                elif '/v3/ec2tokens' == request.path:
-                    prefix = 'ec2creds'
-                if credentials:
-                    try:
-                        user = prefix + '-' + credentials['access']
-                        # ec2tokens and s3tokens API are domain unaware. Lets
-                        # just log it.
-                        domain = 'unknown'
-                        # the message will look like this:
-                        # Blocking request POST /v3/s3tokens, since user \
-                        # b's3creds-123456' b'unknown' has no credit left
-                        # OR 'b'ec2creds-123456 b'unknown' has no credit left
-                    except KeyError:
-                        pass
-
-
-            # grab credentials from an authenticated request
-            if not user or not domain:
-                context = request.environ
-
-                if 'KEYSTONE_AUTH_CONTEXT' in context:
-                    # grab from request env
-                    if not user:
-                        user = context.get('HTTP_X_USER_NAME', None)
-                    if not domain:
-                        domain = context.get('HTTP_X_USER_DOMAIN_NAME', None)
-
-                    # try token info
-                    if not user or not domain:
-                        # grab from token
-                        token_info = context.get('keystone.token_info', None)
-                        if token_info:
-                            token = token_info.get('token', None)
-                            if token:
-                                user_info = token.get('user', None)
-                                if user_info:
-                                    user = user_info.get('name', None)
-                                    domain_info = user_info.get('domain', None)
-                                    if domain_info:
-                                        domain = domain_info.get('name', None)
+            subject, domain = logic.extract_password_auth_credentials(request)
+            if not subject:
+                subject = logic.extract_app_credential(request)
+            if not subject:
+                token_id = logic.extract_token_id(request)
+                if token_id:
+                    token_hash = self.utils.hash_token_id(token_id)
+                    subject = FTOKENCREDS_PREFIX + token_hash
+            if not subject:
+                subject, domain = logic.extract_s3_ec2_credentials(request)
+            if not subject:
+                subject, domain = logic.extract_from_authentication_request(request)
         except Exception as e:
-            self.logger.error("Could not extract credentials from request: %s %s" % (request, e))
+            self.logger.error("Could not extract credentials from request: %s %s %s" % (
+                request.method, request.path, e))
 
-        if not user:
-            user = ''
+        if not subject:
+            subject = ''
         if not domain:
             domain = ''
 
-        return {'user': self.utils.normalize(user), 'domain': self.utils.normalize(domain)}
+        return {'subject': self.utils.normalize(subject), 'domain': self.utils.normalize(domain)}
 
     def process_request(self, request):
         return self.verify_request(request)
 
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
+
+    def get_costs(self, request, response, subject, subject_score):
+        cost = calculate_cost(
+            response.status_code,
+            subject,
+            self.utils.status_cost,
+            self.utils.token_cost
+        )
+
+        # deduct subject credit
+        if cost > 0:
+            # mark request as processed
+            request.environ['lifesaver'] = subject
+            subject_score.reduce(cost)
+            # update score metadata in case the configuration has changed
+            if should_update_score_metadata(
+                subject_score,
+                self.utils.credit,
+                self.utils.refill_time,
+                self.utils.refill_amount
+            ):
+                subject_score.credit = self.utils.credit
+                subject_score.refill_time = self.utils.refill_time
+                subject_score.refill_amount = self.utils.refill_amount
+
+            self.utils.set_score(subject, subject_score)
+            self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
+                subject, subject_score.get(), request.method, request.path,
+                response.status_code))
 
     def verify_request(self, request, response=None):
         """
@@ -160,7 +136,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         """
         result = response
 
-        # skip if not enabled
         if not self.utils.enabled:
             return result
 
@@ -168,59 +143,32 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         if 'lifesaver' in request.environ:
             return result
 
-        credentials = self.get_user(request)
+        credentials = self.get_subject(request)
         if credentials:
-            # request from allowlisted domain?
-            domain = credentials['domain'].encode('utf8')
+            domain = credentials['domain']
             if domain and credentials['domain'] in self.utils.domain_allowlist:
                 return result
 
-            user = credentials['user'].encode('utf8')
-            if user:
-                # request from allowlisted user?
-                if credentials['user'] in self.utils.user_allowlist:
+            subject = credentials['subject']
+            if subject:
+                # request from allowlisted subject?
+                if credentials['subject'] in self.utils.user_allowlist:
                     return result
 
-                # request from blocklisted user?
-                if credentials['user'] in self.utils.user_blocklist:
-                    self.logger.info("Request from blocklisted user %s rejected" % user)
+                # request from blocklisted subject?
+                if credentials['subject'] in self.utils.user_blocklist:
+                    self.logger.info("Request from blocklisted subject %s rejected" % subject)
                     return self.blocklist_response
 
-                user_score = self.utils.get_user_score(credentials['user'])
+                subject_score: score.Score = self.utils.get_score(credentials['subject'])
 
-                if user_score.get() == 0:
-                    self.logger.info("Blocking request %s %s, since user %s %s has no credit left" % (
-                    request.method, request.path, user, domain))
+                if subject_score.get() <= 0:
+                    self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
+                    request.method, request.path, subject[:30], domain))
                     return self.ratelimit_response
 
                 if response:
-                    status = response.status_code
-
-                    # update user score?
-                    if status >= 400:
-                        # what penalty should be applied?
-                        cost = self.utils.status_cost['default']
-                        if str(status) in self.utils.status_cost:
-                            cost = self.utils.status_cost[str(status)]
-                            # mark request as processed
-                            request.environ['lifesaver'] = user
-
-                        # deduct user credit ?
-                        if int(cost) > 0:
-                            user_score.reduce(int(cost))
-
-                            # update score metadata in case the configuration has changed
-                            if user_score.credit != self.utils.credit:
-                                user_score.credit = self.utils.credit
-                            if user_score.refill_time != self.utils.refill_time:
-                                user_score.refill_time = self.utils.refill_time
-                            if user_score.refill_amount != self.utils.refill_amount:
-                                user_score.refill_amount = self.utils.refill_amount
-
-                            self.utils.set_user_score(credentials['user'], user_score)
-                            self.logger.info("User %s %s has a remaining credit of %d - request %s %s returned %d" % (
-                            user, domain, user_score.get(), request.method, request.path,
-                            status))
+                    self.get_costs(request, response, subject, subject_score)
 
         return result
 
