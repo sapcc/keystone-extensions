@@ -13,15 +13,17 @@
 # under the License.
 
 
-from cc.keystone.middleware import score
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
 
-from . import lifesaver_utils as utils
 from . import lifesaver_logic as logic
+from . import lifesaver_utils as utils
 from . import response
-from .lifesaver_logic import FTOKENCREDS_PREFIX, calculate_cost, should_update_score_metadata
+from .lifesaver_logic import calculate_cost
+from .lifesaver_logic import FTOKENCREDS_PREFIX
+from .lifesaver_logic import should_update_score_metadata
+from cc.keystone.middleware import score
 
 CONF = keystone.conf.CONF
 
@@ -49,6 +51,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.debug('refill-time is {0}'.format(self.utils.refill_time))
             self.logger.debug('refill-amount is {0}'.format(self.utils.refill_amount))
             self.logger.debug('status-costs are {0}'.format(self.utils.status_cost))
+            self.logger.debug('token-costs are {0}'.format(self.utils.token_cost))
 
     def get_subject(self, request):
         """
@@ -123,7 +126,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
                 subject, subject_score.get(), request.method, request.path,
                 response.status_code))
-
 
     def verify_request(self, request, response=None):
         """

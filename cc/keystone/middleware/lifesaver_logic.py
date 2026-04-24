@@ -121,7 +121,7 @@ def extract_token_id(request):
         except Exception:
             # Failed to parse JSON body
             pass
-    
+
     # Check GET headers for token
     if request.path == '/v3/auth/tokens' and request.method == 'GET':
         if request.headers and 'X-Subject-Token' in request.headers:
@@ -133,7 +133,7 @@ def extract_token_id(request):
 def extract_s3_ec2_credentials(request):
     """
     Extract S3 or EC2 credentials from request body.
-    
+
     Args:
         request: Request object
     Returns:
@@ -142,7 +142,7 @@ def extract_s3_ec2_credentials(request):
     if (('/v3/s3tokens' == request.path or
                    '/v3/ec2tokens' == request.path) and
                   'POST' == request.method):
-        
+
         try:
             body = request.json_body
         except Exception:
@@ -155,16 +155,16 @@ def extract_s3_ec2_credentials(request):
             body.get('credential') or
             body.get('ec2Credentials')
         )
-        
+
         if not credentials or 'access' not in credentials:
             return None, None
-        
+
         # Determine prefix based on path
         prefix = 's3creds' if request.path == '/v3/s3tokens' else 'ec2creds'
-        
+
         user = prefix + '-' + credentials['access']
         domain = 'unknown'  # ec2tokens and s3tokens API are domain unaware
-        
+
         return user, domain
     return None, None
 
@@ -172,7 +172,7 @@ def extract_s3_ec2_credentials(request):
 def extract_from_authentication_request(request):
     """
     Extract user identifier and domain from various authentication request types.
-    
+
     Args:
         request: Request object
     Returns:
@@ -195,7 +195,8 @@ def extract_from_authentication_request(request):
             if token:
                 user_info = token.get('user', None)
                 if user_info:
-                    user = user_info.get('name', None)
+                    if not user:
+                        user = user_info.get('name', None)
                     domain_info = user_info.get('domain', None)
                     if domain_info:
                         domain = domain_info.get('name', None)
@@ -235,47 +236,47 @@ def hash_token_id(token_id: str, secret_key: str, hash_function: str = 'sha512')
 def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_config):
     """
     Calculate the cost for a request based on status code and user type.
-    
+
     Args:
         status_code: HTTP status code (int)
         user_identifier: User string (used to determine if token-based)
         status_cost_config: Dict of status codes to costs for regular users
         token_cost_config: Dict of status codes to costs for token users
-    
+
     Returns:
         int: Cost to deduct from user's credit
     """
     # No cost for successful responses
     if status_code < 400:
         return 0
-    
+
     # Determine which cost table to use based on user prefix
     if user_identifier.startswith(FTOKENCREDS_PREFIX):
         cost_table = token_cost_config
     else:
         cost_table = status_cost_config
-    
+
     # Get cost for this status code, fallback to default
     status_str = str(status_code)
     if status_str in cost_table:
         return int(cost_table[status_str])
-    
+
     return int(cost_table.get('default', 1))
 
 
 def should_update_score_metadata(score, current_credit, current_refill_time, current_refill_amount):
     """
     Check if score metadata needs updating due to configuration changes.
-    
+
     Args:
         score: Score object with credit, refill_time, refill_amount attributes
         current_credit: Current credit config value
         current_refill_time: Current refill time config value
         current_refill_amount: Current refill amount config value
-    
+
     Returns:
         bool: True if metadata needs updating
     """
-    return (score.credit != current_credit or 
-            score.refill_time != current_refill_time or 
+    return (score.credit != current_credit or
+            score.refill_time != current_refill_time or
             score.refill_amount != current_refill_amount)

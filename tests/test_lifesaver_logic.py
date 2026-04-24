@@ -315,7 +315,7 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
         self.assertEqual(domain, 'header-domain')
     
     def test_falls_back_to_token_info_when_headers_incomplete(self):
-        """Test fallback to token info when headers have only partial data"""
+        """User from headers is preserved; only missing domain is filled from token info."""
         class MockRequest:
             environ = {
                 'KEYSTONE_AUTH_CONTEXT': True,
@@ -332,13 +332,12 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
                     }
                 }
             }
-        
+
         request = MockRequest()
         user, domain = lifesaver_logic.extract_from_authentication_request(request)
-        
-        # NOTE: Due to the implementation logic, when domain is missing from headers,
-        # it enters the token_info block which overwrites BOTH user and domain
-        self.assertEqual(user, 'token-user')
+
+        # user from headers must not be overwritten by token_info
+        self.assertEqual(user, 'header-user')
         self.assertEqual(domain, 'token-domain')
     
     def test_returns_none_when_no_auth_context(self):
