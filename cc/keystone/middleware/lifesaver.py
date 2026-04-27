@@ -21,6 +21,7 @@ from . import lifesaver_logic as logic
 from . import lifesaver_utils as utils
 from . import response
 from .lifesaver_logic import calculate_cost
+from .lifesaver_logic import FTOKENCREDS_PREFIX
 from .lifesaver_logic import should_update_score_metadata
 from cc.keystone.middleware import score
 
@@ -50,11 +51,12 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.debug('refill-time is {0}'.format(self.utils.refill_time))
             self.logger.debug('refill-amount is {0}'.format(self.utils.refill_amount))
             self.logger.debug('status-costs are {0}'.format(self.utils.status_cost))
+            self.logger.debug('token-costs are {0}'.format(self.utils.token_cost))
 
     def get_subject(self, request):
         """
         Tries to fetch the rate-limit subject and its domain from the request.
-        The subject can be a user or credential identifier.
+        The subject can be a user, token, or credential identifier.
         :param request: the clients request
         :return: a dict with 'subject' and 'domain'
         """
@@ -70,6 +72,11 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             subject, domain = logic.extract_password_auth_credentials(request)
             if not subject:
                 subject = logic.extract_app_credential(request)
+            if not subject:
+                token_id = logic.extract_token_id(request)
+                if token_id:
+                    token_hash = self.utils.hash_token_id(token_id)
+                    subject = FTOKENCREDS_PREFIX + token_hash
             if not subject:
                 subject, domain = logic.extract_s3_ec2_credentials(request)
             if not subject:
@@ -96,7 +103,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             response.status_code,
             subject,
             self.utils.status_cost,
-            self.utils.status_cost
+            self.utils.token_cost
         )
 
         # deduct subject credit

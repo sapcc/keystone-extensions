@@ -19,6 +19,7 @@ import memcache
 from oslo_config import cfg
 
 from . import score
+from .lifesaver_logic import hash_token_id
 
 CONF = keystone.conf.CONF
 
@@ -50,6 +51,9 @@ class LifesaverUtils(object):
         CONF.register_opt(
             cfg.DictOpt('status_cost', default=conf.get('status_cost', "default:1,401:10,403:5,404:0,429:0"),
                         help='Credit consumption by status for users'), group=group)
+        CONF.register_opt(
+            cfg.DictOpt('token_cost', default=conf.get('token_cost', "default:1,401:10,403:5,404:10,429:0"),
+                        help='Credit consumption by status for tokens'), group=group)
 
         self.enabled = CONF.lifesaver.enabled.lower() in ['true', '1', 't', 'y', 'yes']
 
@@ -63,6 +67,7 @@ class LifesaverUtils(object):
         self.refill_time = CONF.lifesaver.refill_seconds
         self.refill_amount = CONF.lifesaver.refill_amount
         self.status_cost = CONF.lifesaver.status_cost
+        self.token_cost = CONF.lifesaver.token_cost
 
     def get_memcache_key(self, user: bytes | str):
         if isinstance(user, bytes):
@@ -83,3 +88,10 @@ class LifesaverUtils(object):
 
     def normalize(self, string=''):
         return string.strip().upper()
+
+    def hash_token_id(self, token_id: str) -> str:
+        return hash_token_id(
+            token_id,
+            secret_key=CONF.security_compliance.invalid_password_hash_secret_key,
+            hash_function=CONF.security_compliance.invalid_password_hash_function,
+        )
