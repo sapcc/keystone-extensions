@@ -12,6 +12,14 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import hmac
+import logging
+import socket
+
+LOG = logging.getLogger(__name__)
+
+FTOKENCREDS_PREFIX = 'FTOKENCREDS-'
+
 
 def extract_password_auth_credentials(request):
     """
@@ -94,6 +102,34 @@ def extract_app_credential(request):
     return None
 
 
+def extract_token_id(request):
+    """
+    Extract token ID from request body or headers.
+
+    Args:
+        request: Request object
+    Returns:
+        str: Token ID or None if not found
+    """
+    # Check POST body for token
+    if request.path == '/v3/auth/tokens' and request.method == 'POST':
+        try:
+            body = request.json_body
+            if 'auth' in body and 'identity' in body['auth']:
+                if 'token' in body['auth']['identity']:
+                    return body['auth']['identity']['token'].get('id', None)
+        except Exception:
+            # Failed to parse JSON body
+            pass
+
+    # Check GET headers for token
+    if request.path == '/v3/auth/tokens' and request.method == 'GET':
+        if request.headers and 'X-Subject-Token' in request.headers:
+            return request.headers.get('X-Subject-Token', None)
+
+    return None
+
+
 def extract_s3_ec2_credentials(request):
     """
     Extract S3 or EC2 credentials from request body.
@@ -110,6 +146,7 @@ def extract_s3_ec2_credentials(request):
         try:
             body = request.json_body
         except Exception:
+            # Failed to parse JSON body
             return None, None
 
         # The order is taken from EC2_S3_Resource.py in keystone
@@ -166,24 +203,59 @@ def extract_from_authentication_request(request):
     return user, domain
 
 
+def hash_token_id(token_id: str, secret_key: str, hash_function: str = 'sha512') -> str:
+    """Hash a token ID using HMAC.
+
+    If secret_key is not set, the hostname is used as a fallback and a warning
+    is logged. Token rate-limiting remains active but the hash is less secure.
+
+    Args:
+        token_id: The token ID to hash.
+        secret_key: The secret key for HMAC.
+        hash_function: The hash algorithm to use (default: sha512).
+
+    Returns:
+        The hexadecimal digest of the HMAC hash.
+    """
+    if not secret_key:
+        LOG.warning(
+            "security_compliance.invalid_password_hash_secret_key is not set. "
+            "Token hashing will use the hostname as a fallback secret key. "
+            "This reduces security — please configure a proper secret key."
+        )
+        secret_key = socket.getfqdn()
+
+    return hmac.new(
+        key=secret_key.encode('utf-8'),
+        msg=token_id.encode('utf-8'),
+        digestmod=hash_function
+    ).hexdigest()
+
+
 def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_config):
     """
     Calculate the cost for a request based on status code and user type.
 
     Args:
         status_code: HTTP status code (int)
-        user_identifier: User string
+        user_identifier: User string (used to determine if token-based)
         status_cost_config: Dict of status codes to costs for regular users
-        token_cost_config: Dict of status codes to costs for token users (unused in PR1)
+        token_cost_config: Dict of status codes to costs for token users
 
     Returns:
         int: Cost to deduct from user's credit
     """
+    # No cost for successful responses
     if status_code < 400:
         return 0
 
-    cost_table = status_cost_config
+    # Determine which cost table to use based on user prefix
+    if user_identifier.startswith(FTOKENCREDS_PREFIX):
+        cost_table = token_cost_config
+    else:
+        cost_table = status_cost_config
 
+    # Get cost for this status code, fallback to default
     status_str = str(status_code)
     if status_str in cost_table:
         return int(cost_table[status_str])
