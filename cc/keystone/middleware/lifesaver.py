@@ -91,7 +91,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
     def process_response(self, response, request=None):
         return self.verify_request(request, response)
 
-    def get_costs(self, request, response, subject, subject_score):
+    def get_costs(self, request, response, subject, domain, subject_score):
         cost = calculate_cost(
             response.status_code,
             subject,
@@ -116,9 +116,9 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                 subject_score.refill_amount = self.utils.refill_amount
 
             self.utils.set_score(subject, subject_score)
-            self.logger.info("%s has a remaining credit of %d - request %s %s returned %d" % (
-                subject, subject_score.get(), request.method, request.path,
-                response.status_code))
+            self.logger.info("%s %s has a remaining credit of %d - request %s %s returned %d" % (
+                            subject, domain, subject_score.get(), request.method, request.path,
+                            response.status_code))
 
     def verify_request(self, request, response=None):
         """
@@ -157,11 +157,11 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
                 if subject_score.get() <= 0:
                     self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
-                    request.method, request.path, subject[:30], domain))
+                    request.method, request.path, subject, domain))
                     return self.ratelimit_response
 
                 if response:
-                    self.get_costs(request, response, subject, subject_score)
+                    self.get_costs(request, response, subject, domain, subject_score)
 
         return result
 

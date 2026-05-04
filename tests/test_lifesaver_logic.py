@@ -1,3 +1,17 @@
+# Copyright 2026 SAP SE
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
 import unittest
 import os
 import importlib.util
@@ -273,7 +287,7 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
         self.assertEqual(domain, 'header-domain')
 
     def test_falls_back_to_token_info_when_headers_incomplete(self):
-        """User from headers is preserved; only missing domain is filled from token info."""
+        """ Test that token info is used when headers are missing or incomplete, even if headers are present """
         class MockRequest:
             environ = {
                 'KEYSTONE_AUTH_CONTEXT': True,
@@ -294,7 +308,7 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
         request = MockRequest()
         user, domain = lifesaver_logic.extract_from_authentication_request(request)
 
-        # user from headers must not be overwritten by token_info
+        # user from headers will be overwritten by token_info if headers are incomplete
         self.assertEqual(user, 'token-user')
         self.assertEqual(domain, 'token-domain')
 
