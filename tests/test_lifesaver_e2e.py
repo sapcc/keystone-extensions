@@ -1,3 +1,17 @@
+# Copyright 2026 SAP SE
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
 """
 End-to-End tests for Lifesaver middleware against a real Keystone instance.
 
@@ -5,7 +19,7 @@ These tests require a running Keystone instance with the Lifesaver middleware en
 Set environment variables to configure:
 - OS_AUTH_URL: Keystone endpoint (default: http://localhost:8000/v3)
 - OS_USERNAME: Admin username (default: admin)
-- OS_PASSWORD: Admin password (default: secret)
+- OS_PASSWORD: Admin password (default: s3cr3t)
 - OS_USER_DOMAIN_NAME: Domain name (default: Default)
 - OS_PROJECT_NAME: Project name (default: admin)
 - OS_PROJECT_DOMAIN_NAME: Project domain (default: Default)
@@ -380,15 +394,12 @@ class TestLifesaverE2E(unittest.TestCase):
 class TestLifesaverE2ESetup(unittest.TestCase):
     """Tests to verify the E2E test environment is set up correctly"""
     
-    def test_environment_variables(self):
-        """Check that required environment variables are accessible"""
-        auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
-        self.assertIsNotNone(auth_url, "OS_AUTH_URL should be set")
-        print(f"\n  Using Keystone at: {auth_url}")
-    
     def test_keystone_is_accessible(self):
         """Verify Keystone is running and accessible"""
-        auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
+        auth_url = os.getenv('OS_AUTH_URL')
+        self.assertIsNotNone(auth_url, "OS_AUTH_URL should be set")
+        print(f"\n  Using Keystone at: {auth_url}")
+
         try:
             response = requests.get(auth_url, timeout=5, verify=False)
             self.assertIn(response.status_code, [200, 300],
@@ -405,7 +416,7 @@ if __name__ == '__main__':
     print("\nThese tests run against a REAL Keystone instance.")
     print("Make sure you're running against a TEST instance!")
     print("\nEnvironment:")
-    print(f"  OS_AUTH_URL: {os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')}")
+    print(f"  OS_AUTH_URL: {os.getenv('OS_AUTH_URL')}")
     print(f"  OS_USERNAME: {os.getenv('OS_USERNAME', 'admin')}")
     print(f"  OS_USER_DOMAIN_NAME: {os.getenv('OS_USER_DOMAIN_NAME', 'Default')}")
     print("=" * 60 + "\n")
