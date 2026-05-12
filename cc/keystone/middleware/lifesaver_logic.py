@@ -1,0 +1,209 @@
+# Copyright 2026 SAP SE
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+
+def extract_password_auth_credentials(request):
+    """
+    Extract user credentials from password authentication request body.
+
+    Args:
+        request: Request object
+    Returns:
+        tuple: (user, domain) or (None, None) if not found
+    """
+    if '/v3/auth/tokens' != request.path or 'POST' != request.method:
+        return None, None
+
+    try:
+        body = request.json_body
+    except Exception:
+        return None, None
+
+    if 'auth' not in body:
+        return None, None
+
+    if 'identity' not in body['auth']:
+        return None, None
+
+    identity = body['auth']['identity']
+    if 'password' not in identity:
+        return None, None
+
+    if 'user' not in identity['password']:
+        return None, None
+
+    user_data = identity['password']['user']
+
+    # Extract user (prefer name, fallback to id with prefix)
+    user = user_data.get('name', None)
+    if not user and 'id' in user_data:
+        user = 'id-' + user_data['id']
+
+    # Extract domain (prefer name, fallback to id)
+    domain = None
+    if 'domain' in user_data:
+        domain = user_data['domain'].get('name', None)
+        if not domain and 'id' in user_data['domain']:
+            domain = user_data['domain']['id']
+
+    return user, domain
+
+
+def extract_app_credential(request):
+    """
+    Extract application credential ID from request body.
+
+    Args:
+        request: Request object
+    Returns:
+        str: Application credential ID with 'ac-' prefix, or None if not found
+    """
+    if '/v3/auth/tokens' != request.path or 'POST' != request.method:
+        return None
+
+    try:
+        body = request.json_body
+    except Exception:
+        return None
+
+    if 'auth' not in body:
+        return None
+
+    if 'identity' not in body['auth']:
+        return None
+
+    identity = body['auth']['identity']
+    if 'application_credential' not in identity:
+        return None
+
+    app_cred_id = identity['application_credential'].get('id', None)
+    if app_cred_id:
+        return 'ac-' + app_cred_id
+
+    return None
+
+
+def extract_s3_ec2_credentials(request):
+    """
+    Extract S3 or EC2 credentials from request body.
+
+    Args:
+        request: Request object
+    Returns:
+        tuple: (user with prefix 's3creds-' or 'ec2creds-', domain) or (None, None) if not found
+    """
+    if (('/v3/s3tokens' == request.path or
+                   '/v3/ec2tokens' == request.path) and
+                  'POST' == request.method):
+
+        try:
+            body = request.json_body
+        except Exception:
+            return None, None
+
+        # The order is taken from EC2_S3_Resource.py in keystone
+        credentials = (
+            body.get('credentials') or
+            body.get('credential') or
+            body.get('ec2Credentials')
+        )
+
+        if not credentials or 'access' not in credentials:
+            return None, None
+
+        # Determine prefix based on path
+        prefix = 's3creds' if request.path == '/v3/s3tokens' else 'ec2creds'
+
+        user = prefix + '-' + credentials['access']
+        domain = 'unknown'  # ec2tokens and s3tokens API are domain unaware
+
+        return user, domain
+    return None, None
+
+
+def extract_from_authentication_request(request):
+    """
+    Extract user identifier and domain from various authentication request types.
+
+    Args:
+        request: Request object
+    Returns:
+        tuple: (user, domain) or (None, None) if not found
+    """
+    context = request.environ
+
+    if 'KEYSTONE_AUTH_CONTEXT' not in context:
+        return None, None
+    # grab from request env
+    user = context.get('HTTP_X_USER_NAME', None)
+    domain = context.get('HTTP_X_USER_DOMAIN_NAME', None)
+
+    # try token info
+    if not user or not domain:
+        # grab from token
+        token_info = context.get('keystone.token_info', None)
+        if token_info:
+            token = token_info.get('token', None)
+            if token:
+                user_info = token.get('user', None)
+                if user_info:
+                    user = user_info.get('name', None)
+                    domain_info = user_info.get('domain', None)
+                    if domain_info:
+                        domain = domain_info.get('name', None)
+
+    return user, domain
+
+
+def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_config):
+    """
+    Calculate the cost for a request based on status code and user type.
+
+    Args:
+        status_code: HTTP status code (int)
+        user_identifier: User string
+        status_cost_config: Dict of status codes to costs for regular users
+        token_cost_config: Dict of status codes to costs for token users (unused in PR1)
+
+    Returns:
+        int: Cost to deduct from user's credit
+    """
+    if status_code < 400:
+        return 0
+
+    cost_table = status_cost_config
+
+    status_str = str(status_code)
+    if status_str in cost_table:
+        return int(cost_table[status_str])
+
+    return int(cost_table.get('default', 1))
+
+
+def should_update_score_metadata(score, current_credit, current_refill_time, current_refill_amount):
+    """
+    Check if score metadata needs updating due to configuration changes.
+
+    Args:
+        score: Score object with credit, refill_time, refill_amount attributes
+        current_credit: Current credit config value
+        current_refill_time: Current refill time config value
+        current_refill_amount: Current refill amount config value
+
+    Returns:
+        bool: True if metadata needs updating
+    """
+    return (score.credit != current_credit or
+            score.refill_time != current_refill_time or
+            score.refill_amount != current_refill_amount)

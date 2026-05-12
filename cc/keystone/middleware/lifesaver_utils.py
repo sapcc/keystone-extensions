@@ -49,7 +49,7 @@ class LifesaverUtils(object):
             group=group)
         CONF.register_opt(
             cfg.DictOpt('status_cost', default=conf.get('status_cost', "default:1,401:10,403:5,404:0,429:0"),
-                        help='Credit consumption by status'), group=group)
+                        help='Credit consumption by status for users'), group=group)
 
         self.enabled = CONF.lifesaver.enabled.lower() in ['true', '1', 't', 'y', 'yes']
 
@@ -64,20 +64,22 @@ class LifesaverUtils(object):
         self.refill_amount = CONF.lifesaver.refill_amount
         self.status_cost = CONF.lifesaver.status_cost
 
-    def get_memcache_key(self, user):
+    def get_memcache_key(self, user: bytes | str):
+        if isinstance(user, bytes):
+            user = user.decode("utf-8")
         return hashlib.md5(user.encode()).hexdigest()
 
-    def get_user_score(self, user):
+    def get_score(self, user) -> score.Score:
         key = self.get_memcache_key(user)
-        user_score = self.memcached.gets(key)
-        if not user_score:
-            user_score = score.Score(self.credit, self.refill_time, self.refill_amount)
-        return user_score
+        score_result = self.memcached.gets(key)
+        if score_result is None or not isinstance(score_result, score.Score):
+            score_result = score.Score(self.credit, self.refill_time, self.refill_amount)
+        return score_result
 
-    def set_user_score(self, user, user_score):
+    def set_score(self, user, score_result):
         key = self.get_memcache_key(user)
         expiration_time = self.credit * self.refill_time * self.refill_amount
-        self.memcached.set(key, user_score, expiration_time)
+        self.memcached.set(key, score_result, expiration_time)
 
     def normalize(self, string=''):
         return string.strip().upper()

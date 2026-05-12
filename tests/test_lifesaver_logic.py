@@ -1,0 +1,331 @@
+# Copyright 2026 SAP SE
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+import unittest
+import os
+import importlib.util
+
+# Load the module directly from file path, bypassing forced
+# package imports that would cause a need for unnecessary mocking.
+module_path = os.path.join(
+    os.path.dirname(__file__),
+    '..',
+    'cc',
+    'keystone',
+    'middleware',
+    'lifesaver_logic.py'
+)
+spec = importlib.util.spec_from_file_location("lifesaver_logic", module_path)
+lifesaver_logic = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lifesaver_logic)
+
+
+class TestExtractPasswordAuthCredentials(unittest.TestCase):
+    """Test extracting credentials from password authentication"""
+
+    def test_extracts_user_and_domain_by_name(self):
+        class MockRequest:
+            path = '/v3/auth/tokens'
+            method = 'POST'
+            json_body = {
+                "auth": {
+                    "identity": {
+                        "password": {
+                            "user": {
+                                "name": "testuser",
+                                "domain": {"name": "TestDomain"}
+                            }
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_password_auth_credentials(request)
+
+        self.assertEqual(user, "testuser")
+        self.assertEqual(domain, "TestDomain")
+
+    def test_extracts_user_and_domain_by_id(self):
+        class MockRequest:
+            path = '/v3/auth/tokens'
+            method = 'POST'
+            json_body = {
+                "auth": {
+                    "identity": {
+                        "password": {
+                            "user": {
+                                "id": "user-123",
+                                "domain": {"id": "domain-456"}
+                            }
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_password_auth_credentials(request)
+
+        self.assertEqual(user, "id-user-123")
+        self.assertEqual(domain, "domain-456")
+
+
+class TestExtractAppCredential(unittest.TestCase):
+    """Test extracting application credentials"""
+
+    def test_extracts_app_credential_id(self):
+        class MockRequest:
+            path = '/v3/auth/tokens'
+            method = 'POST'
+            json_body = {
+                "auth": {
+                    "identity": {
+                        "application_credential": {
+                            "id": "app-cred-789"
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        result = lifesaver_logic.extract_app_credential(request)
+
+        self.assertEqual(result, "ac-app-cred-789")
+
+
+class TestExtractS3Ec2Credentials(unittest.TestCase):
+    """Test extracting S3/EC2 credentials"""
+
+    def test_extracts_s3_credentials(self):
+        class MockRequest:
+            path = '/v3/s3tokens'
+            method = 'POST'
+            json_body = {"credentials": {"access": "s3-access-key-123"}}
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_s3_ec2_credentials(request)
+
+        self.assertEqual(user, "s3creds-s3-access-key-123")
+        self.assertEqual(domain, "unknown")
+
+    def test_extracts_ec2_credentials(self):
+        class MockRequest:
+            path = '/v3/ec2tokens'
+            method = 'POST'
+            json_body = {"ec2Credentials": {"access": "ec2-access-key-456"}}
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_s3_ec2_credentials(request)
+
+        self.assertEqual(user, "ec2creds-ec2-access-key-456")
+        self.assertEqual(domain, "unknown")
+
+
+class TestCalculateCost(unittest.TestCase):
+    """Test cost calculation logic"""
+
+    def test_no_cost_for_2xx_status(self):
+        status_cost = {'default': 1, '401': 10}
+        token_cost = {'default': 1, '401': 10}
+
+        cost = lifesaver_logic.calculate_cost(200, 'SOME-USER', status_cost, token_cost)
+
+        self.assertEqual(cost, 0)
+
+    def test_default_cost_applied_for_404(self):
+        status_cost = {'default': 1, '401': 10}
+        token_cost = {'default': 1, '401': 10}
+
+        cost = lifesaver_logic.calculate_cost(404, 'PASSWORD-USER', status_cost, token_cost)
+
+        self.assertEqual(cost, 1)
+
+    def test_401_uses_status_cost(self):
+        status_cost = {'default': 1, '401': 10}
+        token_cost = {'default': 1, '401': 15}
+
+        cost = lifesaver_logic.calculate_cost(401, 'PASSWORD-USER', status_cost, token_cost)
+
+        self.assertEqual(cost, 10)
+
+    def test_unknown_status_uses_default(self):
+        status_cost = {'default': 5}
+        token_cost = {'default': 3}
+
+        cost = lifesaver_logic.calculate_cost(418, 'PASSWORD-USER', status_cost, token_cost)
+
+        self.assertEqual(cost, 5)
+
+
+class TestShouldUpdateScoreMetadata(unittest.TestCase):
+    """Test score metadata update detection"""
+
+    def test_returns_true_when_credit_changed(self):
+        class MockScore:
+            credit = 50
+            refill_time = 60
+            refill_amount = 5
+
+        score = MockScore()
+
+        result = lifesaver_logic.should_update_score_metadata(score, 100, 60, 5)
+
+        self.assertTrue(result)
+
+    def test_returns_true_when_refill_time_changed(self):
+        class MockScore:
+            credit = 100
+            refill_time = 30
+            refill_amount = 5
+
+        score = MockScore()
+
+        result = lifesaver_logic.should_update_score_metadata(score, 100, 60, 5)
+
+        self.assertTrue(result)
+
+    def test_returns_true_when_refill_amount_changed(self):
+        class MockScore:
+            credit = 100
+            refill_time = 60
+            refill_amount = 3
+
+        score = MockScore()
+
+        result = lifesaver_logic.should_update_score_metadata(score, 100, 60, 5)
+
+        self.assertTrue(result)
+
+    def test_returns_false_when_nothing_changed(self):
+        class MockScore:
+            credit = 100
+            refill_time = 60
+            refill_amount = 5
+
+        score = MockScore()
+
+        result = lifesaver_logic.should_update_score_metadata(score, 100, 60, 5)
+
+        self.assertFalse(result)
+
+
+class TestExtractFromAuthenticationRequest(unittest.TestCase):
+    """Test extracting user from authenticated request"""
+
+    def test_extracts_user_from_request_headers(self):
+        """Test extracting user and domain from HTTP headers"""
+        class MockRequest:
+            environ = {
+                'KEYSTONE_AUTH_CONTEXT': True,
+                'HTTP_X_USER_NAME': 'header-user',
+                'HTTP_X_USER_DOMAIN_NAME': 'header-domain'
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_from_authentication_request(request)
+
+        self.assertEqual(user, 'header-user')
+        self.assertEqual(domain, 'header-domain')
+
+    def test_extracts_user_from_token_info(self):
+        """Test extracting user and domain from token info when headers not present"""
+        class MockRequest:
+            environ = {
+                'KEYSTONE_AUTH_CONTEXT': True,
+                'keystone.token_info': {
+                    'token': {
+                        'user': {
+                            'name': 'token-user',
+                            'domain': {
+                                'name': 'token-domain'
+                            }
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_from_authentication_request(request)
+
+        self.assertEqual(user, 'token-user')
+        self.assertEqual(domain, 'token-domain')
+
+    def test_prefers_headers_over_token_info(self):
+        """Test that headers take precedence over token info"""
+        class MockRequest:
+            environ = {
+                'KEYSTONE_AUTH_CONTEXT': True,
+                'HTTP_X_USER_NAME': 'header-user',
+                'HTTP_X_USER_DOMAIN_NAME': 'header-domain',
+                'keystone.token_info': {
+                    'token': {
+                        'user': {
+                            'name': 'token-user',
+                            'domain': {
+                                'name': 'token-domain'
+                            }
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_from_authentication_request(request)
+
+        self.assertEqual(user, 'header-user')
+        self.assertEqual(domain, 'header-domain')
+
+    def test_falls_back_to_token_info_when_headers_incomplete(self):
+        """ Test that token info is used when headers are missing or incomplete, even if headers are present """
+        class MockRequest:
+            environ = {
+                'KEYSTONE_AUTH_CONTEXT': True,
+                'HTTP_X_USER_NAME': 'header-user',
+                # No domain in headers
+                'keystone.token_info': {
+                    'token': {
+                        'user': {
+                            'name': 'token-user',
+                            'domain': {
+                                'name': 'token-domain'
+                            }
+                        }
+                    }
+                }
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_from_authentication_request(request)
+
+        # user from headers will be overwritten by token_info if headers are incomplete
+        self.assertEqual(user, 'token-user')
+        self.assertEqual(domain, 'token-domain')
+
+    def test_returns_none_when_no_auth_context(self):
+        """Test that None is returned when KEYSTONE_AUTH_CONTEXT is missing"""
+        class MockRequest:
+            environ = {
+                'HTTP_X_USER_NAME': 'some-user',
+                'HTTP_X_USER_DOMAIN_NAME': 'some-domain'
+            }
+
+        request = MockRequest()
+        user, domain = lifesaver_logic.extract_from_authentication_request(request)
+
+        self.assertIsNone(user)
+        self.assertIsNone(domain)
+
+
+if __name__ == '__main__':
+    unittest.main()
