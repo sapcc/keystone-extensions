@@ -25,104 +25,63 @@ of course you also need to create a virtual environment and install python depen
 
 this would be a correct output:
 ```
- Keystone is running at http://localhost:8000/v3
-Testing with user: admin@Default
-/Users/I761196/.local/share/uv/python/cpython-3.10.16-macos-aarch64-none/lib/python3.10/unittest/suite.py:166: ResourceWarning: unclosed <socket.socket fd=3, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('127.0.0.1', 61416), raddr=('127.0.0.1', 11211)>
-  setUpClass()
-ResourceWarning: Enable tracemalloc to get the object allocation traceback
+$ python -m unittest tests.test_lifesaver_e2e -v
 test_credit_refill_over_time (tests.test_lifesaver_e2e.TestLifesaverE2E)
-Test that credits refill over time allowing requests again ...
-======================================================================
-TEST: Credit refill over time
-======================================================================
-
-Phase 1: Exhausting credits for user test_refill_user_1767705102...
-[+] Rate limited after 3 attempts
-
-Phase 2: Waiting 70 seconds for credit refill...
-(This tests that credits are actually refilled over time)
-  70 seconds remaining...
-  60 seconds remaining...
-  50 seconds remaining...
-  40 seconds remaining...
-  30 seconds remaining...
-  20 seconds remaining...
-  10 seconds remaining...
-
-Phase 3: Testing if credits have been refilled...
-  Response status: 401
-[+] Credits refilled! Now getting 401 (auth failed) instead of 429
-This means rate limiting was lifted after credit refill
-ok
+Test that credits refill over time allowing requests again ... ok
 test_rate_limiting_across_auth_methods (tests.test_lifesaver_e2e.TestLifesaverE2E)
-Test that rate limiting works for all authentication methods ...
-======================================================================
-TEST: Rate limiting across different authentication methods
-======================================================================
-
-Preparing test data...
-  [Token Helper] Created and revoked token: gAAAAABpXQpVYL20mMds...
-  [Token Helper] Created revoked token: gAAAAABpXQpVbbsg0WPR...
-  [Token Helper] Created valid auth token: gAAAAABpXQpVMWpGYgiX...
-  [App Cred Helper] Using user_id: 786c5d9c6dfe4dd2a08d8156ffaa68e7
-  [App Cred Helper] Created app credential: ecf7a46aa4a94aef925a...
-  [App Cred Helper] Expires at: 2026-01-06T13:12:55Z
-  [App Cred Helper] Waiting 2 seconds for expiration...
-  [App Cred Helper] App credential should now be expired!
-
-Testing: password_auth_with_names
-  Endpoint: http://localhost:8000/v3/auth/tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: password_auth_with_ids
-  Endpoint: http://localhost:8000/v3/auth/tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: app_credential_auth
-  Endpoint: http://localhost:8000/v3/auth/tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: token_auth_post_body
-  Endpoint: http://localhost:8000/v3/auth/tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: token_auth_get_header
-  Endpoint: http://localhost:8000/v3/auth/tokens
-  Method: GET
-Rate limited after 1 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: s3_credentials
-  Endpoint: http://localhost:8000/v3/s3tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-
-Testing: ec2_credentials
-  Endpoint: http://localhost:8000/v3/ec2tokens
-  Method: POST
-Rate limited after 3 attempts (Status: 429)
-Retry-After: 60 seconds
-ok
-test_environment_variables (tests.test_lifesaver_e2e.TestLifesaverE2ESetup)
-Check that required environment variables are accessible ...
-Using Keystone at: http://localhost:8000/v3
-ok
+Test that rate limiting works for all authentication methods. ... ok
 test_keystone_is_accessible (tests.test_lifesaver_e2e.TestLifesaverE2ESetup)
-Verify Keystone is running and accessible ... Keystone is accessible (status: 200)
-ok
+Verify Keystone is running and accessible ... ok
 
 ----------------------------------------------------------------------
-Ran 4 tests in 76.065s
+Ran 3 tests in 26.017s
 
 OK
+
+✓ Keystone is running at http://localhost:8000/v3
+Testing with user: admin@monsoon3
+
+============================================================
+TEST: Credit refill over time
+============================================================
+
+Phase 1: Exhausting credits for user test_refill_user_1778673567...
+Rate limited after 3 attempts
+
+Phase 2: Waiting 20 seconds for credit refill...
+20 seconds remaining...
+10 seconds remaining...
+
+Phase 3: Testing if credits have been refilled...
+Credits refilled! Now getting 401 instead of 429
+
+============================================================
+TEST: Rate limiting across different authentication methods
+============================================================
+
+Preparing test data...
+[App Cred Helper] Created app credential: dc8520bc8b35440cb426...
+
+Testing: password_auth
+Rate limited after 3 attempts
+
+Testing: token_auth_body
+Rate limited after 3 attempts
+
+Testing: token_auth_header
+Rate limited after 3 attempts
+
+Testing: app_credential
+Rate limited after 3 attempts
+
+Testing: s3_credentials
+Rate limited after 3 attempts
+
+Testing: ec2_credentials
+Rate limited after 3 attempts
+
+Using Keystone at: http://localhost:8000/v3
+Keystone is accessible (status: 200)
+
 
 ```
