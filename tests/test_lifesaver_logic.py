@@ -19,7 +19,7 @@ import importlib.util
 # Load the module directly from file path, bypassing forced
 # package imports that would cause a need for unnecessary mocking.
 module_path = os.path.join(
-    os.path.dirname(__file__),
+    os.path.dirname(__file__), 
     '..',
     'cc',
     'keystone',
@@ -104,6 +104,40 @@ class TestExtractAppCredential(unittest.TestCase):
         self.assertEqual(result, "ac-app-cred-789")
 
 
+class TestExtractTokenId(unittest.TestCase):
+    """Test extracting token IDs from requests"""
+
+    def test_extracts_token_from_post_body(self):
+        class MockRequest:
+            path = '/v3/auth/tokens'
+            method = 'POST'
+            json_body = {
+                "auth": {
+                    "identity": {
+                        "token": {"id": "test-token-abc"}
+                    }
+                }
+            }
+            headers = {}
+
+        request = MockRequest()
+        result = lifesaver_logic.extract_token_id(request)
+
+        self.assertEqual(result, "test-token-abc")
+
+    def test_extracts_token_from_get_headers(self):
+        class MockRequest:
+            path = '/v3/auth/tokens'
+            method = 'GET'
+            json_body = {}
+            headers = {'X-Subject-Token': 'header-token-xyz'}
+
+        request = MockRequest()
+        result = lifesaver_logic.extract_token_id(request)
+
+        self.assertEqual(result, "header-token-xyz")
+
+
 class TestExtractS3Ec2Credentials(unittest.TestCase):
     """Test extracting S3/EC2 credentials"""
 
@@ -143,21 +177,29 @@ class TestCalculateCost(unittest.TestCase):
 
         self.assertEqual(cost, 0)
 
-    def test_default_cost_applied_for_404(self):
-        status_cost = {'default': 1, '401': 10}
-        token_cost = {'default': 1, '401': 10}
+    def test_404_for_token_user_uses_token_cost(self):
+        status_cost = {'default': 1, '404': 0}
+        token_cost = {'default': 1, '404': 10}
+
+        cost = lifesaver_logic.calculate_cost(404, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER-123', status_cost, token_cost)
+
+        self.assertEqual(cost, 10)
+
+    def test_404_for_password_user_uses_status_cost(self):
+        status_cost = {'default': 1, '404': 0}
+        token_cost = {'default': 1, '404': 10}
 
         cost = lifesaver_logic.calculate_cost(404, 'PASSWORD-USER', status_cost, token_cost)
 
-        self.assertEqual(cost, 1)
+        self.assertEqual(cost, 0)
 
-    def test_401_uses_status_cost(self):
+    def test_401_for_token_user(self):
         status_cost = {'default': 1, '401': 10}
         token_cost = {'default': 1, '401': 15}
 
-        cost = lifesaver_logic.calculate_cost(401, 'PASSWORD-USER', status_cost, token_cost)
+        cost = lifesaver_logic.calculate_cost(401, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER', status_cost, token_cost)
 
-        self.assertEqual(cost, 10)
+        self.assertEqual(cost, 15)
 
     def test_unknown_status_uses_default(self):
         status_cost = {'default': 5}
@@ -325,6 +367,76 @@ class TestExtractFromAuthenticationRequest(unittest.TestCase):
 
         self.assertIsNone(user)
         self.assertIsNone(domain)
+
+
+class TestHashTokenId(unittest.TestCase):
+    """Test the hash_token_id function"""
+
+    def test_returns_consistent_hash(self):
+        """Same input always produces the same output"""
+        result1 = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+        result2 = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+
+        self.assertEqual(result1, result2)
+
+    def test_different_tokens_produce_different_hashes(self):
+        """Different token IDs produce different hashes"""
+        result1 = lifesaver_logic.hash_token_id('token-1', 'secret-key')
+        result2 = lifesaver_logic.hash_token_id('token-2', 'secret-key')
+
+        self.assertNotEqual(result1, result2)
+
+    def test_different_keys_produce_different_hashes(self):
+        """Different secret keys produce different hashes"""
+        result1 = lifesaver_logic.hash_token_id('test-token', 'key-1')
+        result2 = lifesaver_logic.hash_token_id('test-token', 'key-2')
+
+        self.assertNotEqual(result1, result2)
+
+    def test_default_sha512_produces_128_char_hash(self):
+        """SHA-512 (default) produces a 128-character hex digest"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+
+        self.assertEqual(len(result), 128)
+
+    def test_sha256_produces_64_char_hash(self):
+        """SHA-256 produces a 64-character hex digest"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key', hash_function='sha256')
+
+        self.assertEqual(len(result), 64)
+
+    def test_falls_back_to_hostname_when_secret_key_is_none(self):
+        """Falls back to hostname and returns a valid hash when secret key is None"""
+        result = lifesaver_logic.hash_token_id('test-token', None)
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
+
+    def test_falls_back_to_hostname_when_secret_key_is_empty(self):
+        """Falls back to hostname and returns a valid hash when secret key is empty"""
+        result = lifesaver_logic.hash_token_id('test-token', '')
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
+
+    def test_fallback_matches_explicit_hostname_key(self):
+        """Hash with missing key equals hash using hostname as key"""
+        import socket
+        result_fallback = lifesaver_logic.hash_token_id('test-token', None)
+        result_hostname = lifesaver_logic.hash_token_id('test-token', socket.getfqdn())
+        self.assertIsNotNone(result_fallback)
+        self.assertNotEqual(result_fallback, '')
+        self.assertEqual(result_fallback, result_hostname)
+
+    def test_logs_warning_when_secret_key_is_missing(self):
+        """Warning is logged when secret key is None or empty"""
+        import logging
+        with self.assertLogs('lifesaver_logic', level=logging.WARNING) as cm:
+            lifesaver_logic.hash_token_id('test-token', None)
+        self.assertTrue(any('invalid_password_hash_secret_key' in line for line in cm.output))
+
+    def test_returns_hex_string(self):
+        """Returns a valid hexadecimal string"""
+        result = lifesaver_logic.hash_token_id('test-token', 'secret-key')
+
+        # Should only contain hex characters
+        self.assertTrue(all(c in '0123456789abcdef' for c in result))
 
 
 if __name__ == '__main__':
