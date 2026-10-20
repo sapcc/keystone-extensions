@@ -162,11 +162,11 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for user %s (%s)" % (
-                            e.message, assignment['user_id'], assignment))
+                            str(e), assignment['user_id'], assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for user %s (%s)" % (
-                            e.message, assignment['user_id'], assignment))
+                            str(e), assignment['user_id'], assignment))
                     assignment_manager.driver.delete_user_assignments(
                         assignment['user_id'])
 
@@ -174,11 +174,11 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for group %s (%s)" % (
-                            e.message, assignment['group_id'], assignment))
+                            str(e), assignment['group_id'], assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for group %s (%s)" % (
-                            e.message, assignment['group_id'], assignment))
+                            str(e), assignment['group_id'], assignment))
                     assignment_manager.driver.delete_group_assignments(
                         assignment['group_id'])
 
@@ -186,12 +186,12 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for domain %s (%s)" % (
-                            e.message, assignment['domain_id'],
+                            str(e), assignment['domain_id'],
                             assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for domain %s (%s)" % (
-                            e.message, assignment['domain_id'],
+                            str(e), assignment['domain_id'],
                             assignment))
                     assignment_manager.driver.delete_domain_assignments(
                         assignment['domain_id'])
@@ -200,12 +200,12 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for project %s (%s)" % (
-                            e.message, assignment['project_id'],
+                            str(e), assignment['project_id'],
                             assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for project %s (%s)" % (
-                            e.message, assignment['project_id'],
+                            str(e), assignment['project_id'],
                             assignment))
                     assignment_manager.driver.delete_project_assignments(
                         assignment['project_id'])
@@ -362,7 +362,7 @@ class RotateSecretKeys(BaseApp):
             keys[new_primary_key] = keys.pop(0)
             LOG.info('Promoted key 0 to be the primary: %s %s' % (new_primary_key, keys[new_primary_key]))
 
-            if secret.metadata.annotations.has_key('max_active_keys'):
+            if 'max_active_keys' in secret.metadata.annotations:
                 max_active_keys = int(secret.metadata.annotations['max_active_keys'])
 
                 # purge excess keys
