@@ -239,12 +239,19 @@ class GroupApi(ldap_backend.GroupApi):
     # Takes care of flattening active directory group member ranged query responses
     # https://msdn.microsoft.com/en-us/library/Aa367017
     def flatten_ranges(self, dn, member):
-        for attrname in member:
+        # Iterate over a snapshot of the keys: the consolidated attribute
+        # is added to member below while this loop is running.
+        for attrname in list(member):
             if ';range=' in attrname:
                 actual_attrname, range_stmt = attrname.split(';')
                 bound_lower, bound_upper = [
                     int(x) for x in range_stmt.split('=')[1].split('-')
                 ]
+
+                # Active Directory returns the members only under the
+                # ranged keys, never under the plain attribute, so the
+                # consolidated list has to be created before it is filled.
+                member[actual_attrname] = []
 
                 step = bound_upper - bound_lower + 1
                 while True:
@@ -258,7 +265,7 @@ class GroupApi(ldap_backend.GroupApi):
 
                     assert len(attrs) == 1
 
-                    ret_attrname = attrs.keys()[0]
+                    ret_attrname = next(iter(attrs))
 
                     member[actual_attrname].extend(attrs[ret_attrname])
                     if ret_attrname.endswith('-*'):
