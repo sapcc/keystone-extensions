@@ -1,0 +1,91 @@
+roles:
+  - name: cloud_identity_viewer
+    description: Keystone Cloud Read-Only (deprecated)
+  - name: role_admin
+    description: Keystone Role Administrator
+  - name: role_viewer
+    description: Keystone Role Read-Only
+role_inferences:
+  - prior_role: admin
+    implied_role: member
+  - prior_role: member
+    implied_role: reader
+  - prior_role: cloud_identity_viewer
+    implied_role: reader
+  - prior_role: role_admin
+    implied_role: role_viewer
+regions:
+  - id: qa-de-1
+    description: QA Germany - Walldorf/Rot
+    parent_region: eu
+  - id: eu
+    description: Europe
+services:
+  - name: keystone
+    type: identity
+    description: Openstack Identity
+    endpoints:
+      - interface: public
+        region: qa-de-1
+        url: https://identity.example.test/v3
+      - interface: admin
+        region: qa-de-1
+        url: https://identity.example.test/v3
+      - interface: internal
+        region: qa-de-1
+        url: http://keystone:5000/v3
+domains:
+  - name: Default
+    id: default
+    description: Openstack Internal Domain
+    enabled: true
+projects:
+  - name: admin
+    domain: Default
+    description: Administrator Project
+  - name: service
+    domain: Default
+    description: Services Project
+users:
+  - name: admin
+    domain: Default
+    description: Openstack Cloud Administrator
+    enabled: true
+groups:
+  - name: administrators
+    domain: Default
+    description: Administrators
+  - name: members
+    domain: Default
+    description: Members
+group_memberships:
+  - group: {name: administrators, domain: Default}
+    user: {name: admin, domain: Default}
+role_assignments:
+  - user: {name: admin, domain: Default}
+    domain: Default
+    role: admin
+  - user: {name: admin, domain: Default}
+    project: {name: admin, domain: Default}
+    role: admin
+  - user: {name: admin, domain: Default}
+    project: {name: service, domain: Default}
+    role: admin
+  - user: {name: admin, domain: Default}
+    system: all
+    role: admin
+  - group: {name: administrators, domain: Default}
+    domain: Default
+    role: admin
+  - group: {name: administrators, domain: Default}
+    project: {name: admin, domain: Default}
+    role: admin
+  - group: {name: administrators, domain: Default}
+    project: {name: service, domain: Default}
+    role: admin
+  - group: {name: administrators, domain: Default}
+    system: all
+    role: admin
+  - group: {name: members, domain: Default}
+    domain: Default
+    role: member

@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import argparse
 import sys
 import types
 import unittest
@@ -116,6 +117,37 @@ class TestRotateSecretKeys(unittest.TestCase):
         # AttributeError on dict.has_key, which the broad except swallowed, so
         # the secret was never written back.
         api_instance.replace_namespaced_secret.assert_called_once()
+
+
+class TestBootstrapCommand(unittest.TestCase):
+    def test_bootstrap_parser_uses_mounted_file_by_default(self):
+        parser = argparse.ArgumentParser()
+        cli.add_command_parsers(parser.add_subparsers())
+        args = parser.parse_args(['bootstrap'])
+        self.assertIs(cli.Bootstrap, args.cmd_class)
+        self.assertEqual('/etc/keystone/bootstrap.yaml', args.bootstrap_file)
+        args = parser.parse_args(
+            ['bootstrap', '--bootstrap-file', 'local.yaml'])
+        self.assertEqual('local.yaml', args.bootstrap_file)
+
+    def test_bootstrap_runs_consumer(self):
+        conf = types.SimpleNamespace(command=types.SimpleNamespace(
+            bootstrap_file='/etc/keystone/bootstrap.yaml'))
+        with mock.patch.object(cli, 'CONF', conf), \
+                mock.patch.object(cli.bootstrap, 'run') as run:
+            cli.Bootstrap.main()
+        run.assert_called_once_with('/etc/keystone/bootstrap.yaml')
+
+    def test_bootstrap_failure_exits_nonzero(self):
+        conf = types.SimpleNamespace(command=types.SimpleNamespace(
+            bootstrap_file='missing.yaml'))
+        with mock.patch.object(cli, 'CONF', conf), \
+                mock.patch.object(
+                    cli.bootstrap, 'run',
+                    side_effect=cli.bootstrap.BootstrapError('missing file')):
+            with self.assertRaises(SystemExit) as error:
+                cli.Bootstrap.main()
+        self.assertEqual(1, error.exception.code)
 
 
 if __name__ == '__main__':
