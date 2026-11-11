@@ -13,8 +13,11 @@
 # under the License.
 
 import argparse
+import contextlib
 import io
+from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -124,8 +127,10 @@ class TestRotateSecretKeys(unittest.TestCase):
 class TestBootstrapCommand(unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.conf = types.SimpleNamespace(command=types.SimpleNamespace(
-            bootstrap_file='/etc/keystone/bootstrap.yaml'))
+        self.conf = types.SimpleNamespace(
+            debug=True, insecure_debug=False,
+            command=types.SimpleNamespace(
+                bootstrap_file='/etc/keystone/bootstrap.yaml'))
         self.resource_api = mock.Mock()
         self.resource_api.get_domain_by_name.return_value = {
             'id': 'existing-domain-id'}
@@ -225,6 +230,45 @@ class TestBootstrapCommand(unittest.TestCase):
                     self.assertEqual(
                         'Cannot look up project cloud_admin in domain ccadmin '
                         '(RuntimeError)\n', self.output.getvalue())
+
+    def test_bootstrap_errors_hide_passwords_without_insecure_debug(self):
+        password = 'bootstrap-password-must-not-be-logged'
+        domain = 'domains:\n- name: ccadmin\n  config:\n    ldap:\n'
+        cases = (
+            ('domains: [\n  password: ' + password,
+             'Invalid bootstrap YAML'),
+            (domain + '      password: {invalid: ' + password + '}\n',
+             'Invalid bootstrap configuration'),
+            (domain + '      password: ' + password + '\n',
+             'Cannot load Keystone backends (RuntimeError)'),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bootstrap.yaml'
+            self.conf.command.bootstrap_file = str(path)
+            for text, message in cases:
+                with self.subTest(message=message):
+                    path.write_text(text, encoding='utf-8')
+                    self.output.seek(0)
+                    self.output.truncate()
+                    stderr = io.StringIO()
+                    with mock.patch.object(cli.bootstrap, 'CONF', self.conf), \
+                            mock.patch.object(
+                                cli.bootstrap.backends, 'load_backends',
+                                side_effect=RuntimeError(password)), \
+                            self.assertLogs('cc.keystone',
+                                            level='DEBUG') as captured, \
+                            contextlib.redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as error:
+                            cli.Bootstrap.main()
+                    self.assertEqual(1, error.exception.code)
+                    output = '\n'.join(captured.output + [
+                        self.output.getvalue(), stderr.getvalue()])
+                    self.assertNotIn(password, output)
+                    self.assertIn('Keystone bootstrap failed: ' + message,
+                                  output)
+                    self.assertIn(
+                        'Project cloud_admin in domain ccadmin: '
+                        'existing-project-id\n', output)
 
     def test_unexpected_bootstrap_error_still_reports_project_id(self):
         failure = RuntimeError('unexpected bootstrap error')

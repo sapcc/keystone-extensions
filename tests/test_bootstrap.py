@@ -14,6 +14,7 @@
 
 import contextlib
 import copy
+import io
 import os
 from pathlib import Path
 import sqlite3
@@ -24,6 +25,7 @@ import unittest
 from unittest import mock
 import uuid
 
+from oslo_log import log
 import yaml
 
 from keystone.cmd import bootstrap as native_bootstrap
@@ -293,6 +295,55 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
         PROVIDERS.identity_api.get_group_by_name('administrators', 'default')
         self.assertIn('1 bootstrap operation(s) failed', str(error.exception))
         self.assertIn('endpoints[0]', str(log.error.call_args_list))
+
+    def test_passwords_are_not_logged_when_insecure_debug_is_false(self):
+        self.config_fixture.config(debug=True, insecure_debug=False)
+        config, driver = self.ldap_config()
+        old_password = 'bootstrap-old-ldap-password'
+        new_password = 'bootstrap-new-ldap-password'
+        config['ldap']['password'] = new_password
+        domain = unit.new_domain_ref(name='ccadmin')
+        PROVIDERS.resource_api.create_domain(domain['id'], domain)
+        PROVIDERS.domain_config_api.create_config(domain['id'], {
+            'identity': {'driver': 'ldap'},
+            'ldap': {'password': old_password},
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bootstrap.yaml'
+            path.write_text(yaml.safe_dump(self.data), encoding='utf-8')
+            with mock.patch.object(bootstrap.backends, 'load_backends',
+                                   return_value=self.managers):
+                for phase in ('update', 'repeat', 'failure'):
+                    with self.subTest(phase=phase):
+                        if phase == 'failure':
+                            failure = RuntimeError(
+                                'LDAP bind failed: %s' % new_password)
+                            driver.get_group_by_name.side_effect = failure
+                        stream = io.StringIO()
+                        error_message = ''
+                        # Capture all extension log levels and direct output.
+                        with self.assertLogs('cc.keystone',
+                                             level=log.TRACE) as captured, \
+                                contextlib.redirect_stdout(stream), \
+                                contextlib.redirect_stderr(stream):
+                            if phase == 'failure':
+                                with self.assertRaises(
+                                        bootstrap.BootstrapError) as error:
+                                    bootstrap.run(path)
+                                error_message = str(error.exception)
+                            else:
+                                bootstrap.run(path)
+                        output = '\n'.join(captured.output + [
+                            stream.getvalue(), error_message])
+                        for password in (old_password, new_password):
+                            self.assertNotIn(password, output)
+                        if phase == 'failure':
+                            self.assertIn('Failed to reconcile', output)
+                            self.assertIn('RuntimeError', output)
+                        else:
+                            self.assertIn('Keystone bootstrap completed',
+                                          output)
 
     def test_failed_domain_config_blocks_only_dependent_identity_work(self):
         config, driver = self.ldap_config()
