@@ -74,6 +74,20 @@ class Bootstrap(BaseApp):
         except bootstrap.BootstrapError as error:
             LOG.error('Keystone bootstrap failed: %s', error)
             raise SystemExit(1)
+        finally:
+            try:
+                project_id = bootstrap.get_cloud_admin_project_id()
+            except Exception as error:
+                # Backend exceptions may contain credentials or SQL parameters.
+                print('Cannot look up project cloud_admin in domain ccadmin '
+                      '(%s)' % type(error).__name__)
+            else:
+                if project_id is None:
+                    print('Project cloud_admin in domain ccadmin '
+                          'was not found')
+                else:
+                    print('Project cloud_admin in domain ccadmin: %s' %
+                          project_id)
 
 
 class UserScore(BaseApp):

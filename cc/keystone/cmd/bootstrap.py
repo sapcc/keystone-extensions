@@ -18,9 +18,12 @@ import uuid
 
 from oslo_log import log
 
+from keystone.common import cache
 from keystone.common import driver_hints
+from keystone.common import provider_api
 import keystone.conf
 from keystone import exception
+from keystone import resource
 from keystone.server import backends
 
 from cc.keystone.cmd.bootstrap_config import BootstrapError
@@ -346,6 +349,23 @@ class Bootstrapper:
             self._ensure_link(
                 lambda: self.assignment_api.get_grant(**grant),
                 lambda: self.assignment_api.create_grant(**grant))
+
+
+def get_cloud_admin_project_id():
+    """Resolve the stored project independently of the bootstrap input."""
+    resource_api = getattr(provider_api.ProviderAPIs, 'resource_api', None)
+    if resource_api is None:
+        # Invalid input or failed backend setup may leave this API unloaded.
+        # Only the resource manager is needed for these read-only lookups.
+        cache.configure_cache()
+        cache.configure_invalidation_region()
+        resource_api = resource.Manager()
+    try:
+        domain = resource_api.get_domain_by_name('ccadmin')
+        project = resource_api.get_project_by_name('cloud_admin', domain['id'])
+    except exception.NotFound:
+        return None
+    return project['id']
 
 
 def run(path):

@@ -327,6 +327,10 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
 
     def test_consecutive_cli_processes_are_idempotent(self):
         self.ldap_config()
+        other_project = unit.new_project_ref(name='cloud_admin',
+                                             domain_id='default')
+        PROVIDERS.resource_api.create_project(other_project['id'],
+                                              other_project)
         root = Path(__file__).resolve().parents[1]
         runner = root / 'tests' / 'fixtures' / 'bootstrap_runner.py'
         with tempfile.TemporaryDirectory() as directory:
@@ -371,6 +375,16 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
                 with contextlib.closing(
                         sqlite3.connect(database_path)) as connection:
                     snapshots.append(list(connection.iterdump()))
+                    project_id = connection.execute(
+                        'SELECT project.id FROM project '
+                        'JOIN project AS domain '
+                        'ON project.domain_id = domain.id '
+                        'WHERE project.name = ? AND domain.name = ? '
+                        'AND domain.is_domain = 1',
+                        ('cloud_admin', 'ccadmin')).fetchone()[0]
+                    self.assertIn(
+                        'Project cloud_admin in domain ccadmin: %s\n' %
+                        project_id, result.stdout)
                     if run == 0:
                         # Confirm the first command applied the declarations,
                         # rather than accepting two successful no-op commands.
@@ -390,6 +404,26 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
             # This includes every resource, grant, inference, LDAP public-ID
             # mapping, domain configuration value and the admin password hash.
             self.assertEqual(snapshots[0], snapshots[1])
+
+            # Reporting must also work in a fresh process when input validation
+            # prevents the normal bootstrap backend initialization.
+            for text in (None, 'domains: [', 'projects: {}'):
+                with self.subTest(invalid_file=text):
+                    if text is None:
+                        bootstrap_path.unlink()
+                    else:
+                        bootstrap_path.write_text(text, encoding='utf-8')
+                    result = subprocess.run(
+                        command, cwd=root, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, timeout=60)
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn(
+                        'Project cloud_admin in domain ccadmin: %s\n' %
+                        project_id, result.stdout)
+                    with contextlib.closing(
+                            sqlite3.connect(database_path)) as connection:
+                        self.assertEqual(snapshots[1],
+                                         list(connection.iterdump()))
 
     def test_unlisted_resources_and_grants_are_preserved(self):
         project = unit.new_project_ref(domain_id='default')

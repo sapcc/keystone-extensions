@@ -13,6 +13,7 @@
 # under the License.
 
 import argparse
+import io
 import sys
 import types
 import unittest
@@ -36,6 +37,7 @@ def _install_kubernetes_stub():
 _install_kubernetes_stub()
 
 from cc.keystone.cmd import cli  # noqa: E402
+from keystone.common import provider_api  # noqa: E402
 from keystone import exception  # noqa: E402
 
 
@@ -120,6 +122,26 @@ class TestRotateSecretKeys(unittest.TestCase):
 
 
 class TestBootstrapCommand(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.conf = types.SimpleNamespace(command=types.SimpleNamespace(
+            bootstrap_file='/etc/keystone/bootstrap.yaml'))
+        self.resource_api = mock.Mock()
+        self.resource_api.get_domain_by_name.return_value = {
+            'id': 'existing-domain-id'}
+        self.resource_api.get_project_by_name.return_value = {
+            'id': 'existing-project-id'}
+        self.output = io.StringIO()
+        for patcher in (
+            mock.patch.object(cli, 'CONF', self.conf),
+            mock.patch.object(provider_api, 'ProviderAPIs',
+                              types.SimpleNamespace(
+                                  resource_api=self.resource_api)),
+            mock.patch.object(sys, 'stdout', self.output),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_bootstrap_parser_uses_mounted_file_by_default(self):
         parser = argparse.ArgumentParser()
         cli.add_command_parsers(parser.add_subparsers())
@@ -131,23 +153,88 @@ class TestBootstrapCommand(unittest.TestCase):
         self.assertEqual('local.yaml', args.bootstrap_file)
 
     def test_bootstrap_runs_consumer(self):
-        conf = types.SimpleNamespace(command=types.SimpleNamespace(
-            bootstrap_file='/etc/keystone/bootstrap.yaml'))
-        with mock.patch.object(cli, 'CONF', conf), \
-                mock.patch.object(cli.bootstrap, 'run') as run:
+        with mock.patch.object(cli.bootstrap, 'run') as run:
             cli.Bootstrap.main()
         run.assert_called_once_with('/etc/keystone/bootstrap.yaml')
+        self.assertEqual(
+            'Project cloud_admin in domain ccadmin: existing-project-id\n',
+            self.output.getvalue())
+        self.resource_api.get_domain_by_name.assert_called_once_with('ccadmin')
+        self.resource_api.get_project_by_name.assert_called_once_with(
+            'cloud_admin', 'existing-domain-id')
 
     def test_bootstrap_failure_exits_nonzero(self):
-        conf = types.SimpleNamespace(command=types.SimpleNamespace(
-            bootstrap_file='missing.yaml'))
-        with mock.patch.object(cli, 'CONF', conf), \
-                mock.patch.object(
-                    cli.bootstrap, 'run',
-                    side_effect=cli.bootstrap.BootstrapError('missing file')):
+        self.conf.command.bootstrap_file = 'missing.yaml'
+        with mock.patch.object(
+                cli.bootstrap, 'run',
+                side_effect=cli.bootstrap.BootstrapError('missing file')):
             with self.assertRaises(SystemExit) as error:
                 cli.Bootstrap.main()
         self.assertEqual(1, error.exception.code)
+        self.assertEqual(
+            'Project cloud_admin in domain ccadmin: existing-project-id\n',
+            self.output.getvalue())
+
+    def test_missing_cloud_admin_project_is_reported_after_any_result(self):
+        for lookup, error in (
+            ('get_domain_by_name', exception.DomainNotFound(
+                domain_id='ccadmin')),
+            ('get_project_by_name', exception.ProjectNotFound(
+                project_id='cloud_admin')),
+        ):
+            for failed in (False, True):
+                with self.subTest(lookup=lookup, failed=failed):
+                    self.output.seek(0)
+                    self.output.truncate()
+                    failure = (cli.bootstrap.BootstrapError('failed')
+                               if failed else None)
+                    with mock.patch.object(self.resource_api, lookup,
+                                           side_effect=error), \
+                            mock.patch.object(cli.bootstrap, 'run',
+                                              side_effect=failure):
+                        if failed:
+                            with self.assertRaises(SystemExit) as result:
+                                cli.Bootstrap.main()
+                            self.assertEqual(1, result.exception.code)
+                        else:
+                            cli.Bootstrap.main()
+                    self.assertEqual(
+                        'Project cloud_admin in domain ccadmin '
+                        'was not found\n',
+                        self.output.getvalue())
+
+    def test_project_lookup_error_preserves_result_and_hides_secrets(self):
+        for lookup in ('get_domain_by_name', 'get_project_by_name'):
+            for failed in (False, True):
+                with self.subTest(lookup=lookup, failed=failed):
+                    self.output.seek(0)
+                    self.output.truncate()
+                    failure = (cli.bootstrap.BootstrapError('failed')
+                               if failed else None)
+                    with mock.patch.object(
+                            self.resource_api, lookup,
+                            side_effect=RuntimeError('secret-password')), \
+                            mock.patch.object(cli.bootstrap, 'run',
+                                              side_effect=failure):
+                        if failed:
+                            with self.assertRaises(SystemExit) as result:
+                                cli.Bootstrap.main()
+                            self.assertEqual(1, result.exception.code)
+                        else:
+                            cli.Bootstrap.main()
+                    self.assertEqual(
+                        'Cannot look up project cloud_admin in domain ccadmin '
+                        '(RuntimeError)\n', self.output.getvalue())
+
+    def test_unexpected_bootstrap_error_still_reports_project_id(self):
+        failure = RuntimeError('unexpected bootstrap error')
+        with mock.patch.object(cli.bootstrap, 'run', side_effect=failure):
+            with self.assertRaises(RuntimeError) as error:
+                cli.Bootstrap.main()
+        self.assertIs(failure, error.exception)
+        self.assertEqual(
+            'Project cloud_admin in domain ccadmin: existing-project-id\n',
+            self.output.getvalue())
 
 
 if __name__ == '__main__':
