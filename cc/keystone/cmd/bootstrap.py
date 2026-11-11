@@ -54,18 +54,14 @@ class Bootstrapper:
         self.assignment_api = managers['assignment_api']
         self.catalog_api = managers['catalog_api']
         self._cache = {}
+        self._failure_count = 0
+        self._failed_identity_domains = set()
 
     def apply(self, config):
         validate_config(config)
-        if any('config' in domain for domain in config.get('domains', [])):
-            if not (CONF.identity.domain_specific_drivers_enabled
-                    and CONF.identity.domain_configurations_from_database):
-                raise BootstrapError(
-                    'Domain configuration requires [identity] '
-                    'domain_specific_drivers_enabled and '
-                    'domain_configurations_from_database')
-
         self._cache.clear()
+        self._failure_count = 0
+        self._failed_identity_domains.clear()
         # Complete domain configuration before making any identity calls. The
         # identity manager then loads the right driver and public ID mappings.
         for section, reconcile in (
@@ -80,17 +76,23 @@ class Bootstrapper:
             if section == 'regions':
                 items = ordered_regions(items)
             for index, item in enumerate(items):
-                try:
-                    reconcile(item)
-                except BootstrapError:
-                    raise
-                except Exception as error:
-                    # Backend exceptions can contain SQL parameters or LDAP
-                    # credentials. Keep those out of the command's log output.
-                    raise BootstrapError(
-                        'Failed to reconcile %s[%s] (%s)' %
-                        (section, index, type(error).__name__)) from error
+                self._attempt('%s[%s]' % (section, index), reconcile, item)
+        if self._failure_count:
+            raise BootstrapError(
+                '%s bootstrap operation(s) failed; see errors above' %
+                self._failure_count)
         LOG.info('Keystone bootstrap completed')
+
+    def _attempt(self, label, reconcile, *args):
+        try:
+            reconcile(*args)
+        except Exception as error:
+            # Backend exceptions can contain SQL parameters or LDAP
+            # credentials. Only our BootstrapError messages are safe to log.
+            detail = (str(error) if isinstance(error, BootstrapError)
+                      else type(error).__name__)
+            self._failure_count += 1
+            LOG.error('Failed to reconcile %s (%s)', label, detail)
 
     def _ensure(self, label, attributes, lookup, create, update):
         try:
@@ -153,6 +155,8 @@ class Bootstrapper:
         return self._cache[key]['id']
 
     def _qualified_id(self, kind, ref):
+        if kind != 'project':
+            self._check_identity_domain(ref['domain'])
         key = (kind, ref['domain'], ref['name'])
         if key not in self._cache:
             domain_id = self._domain_id(ref['domain'])
@@ -167,7 +171,22 @@ class Bootstrapper:
                                       ref['domain'])) from None
         return self._cache[key]['id']
 
+    def _check_identity_domain(self, name):
+        if name in self._failed_identity_domains:
+            raise BootstrapError(
+                'Identity configuration for domain %s failed' % name)
+
     def _domain(self, domain):
+        if 'config' in domain:
+            # If setup fails, identity operations must not fall back to the
+            # default SQL driver or use an outdated domain configuration.
+            self._failed_identity_domains.add(domain['name'])
+            if not (CONF.identity.domain_specific_drivers_enabled
+                    and CONF.identity.domain_configurations_from_database):
+                raise BootstrapError(
+                    'Domain configuration requires [identity] '
+                    'domain_specific_drivers_enabled and '
+                    'domain_configurations_from_database')
         attributes = {key: value for key, value in domain.items()
                       if key not in ('id', 'config')}
         ref = self._ensure(
@@ -190,6 +209,7 @@ class Bootstrapper:
                 self.domain_config_api.update_config(ref['id'], changes)
                 LOG.info('Updated configuration for domain %s (%s)',
                          domain['name'], ref['id'])
+            self._failed_identity_domains.discard(domain['name'])
 
     def _role(self, role):
         ref = self._ensure(
@@ -241,8 +261,9 @@ class Bootstrapper:
             lambda: _create_with_id(self.catalog_api.create_service,
                                     attributes),
             self.catalog_api.update_service)
-        for endpoint in service.get('endpoints', []):
-            self._endpoint(ref['id'], endpoint)
+        for index, endpoint in enumerate(service.get('endpoints', [])):
+            self._attempt('%s endpoints[%s]' % (label, index),
+                          self._endpoint, ref['id'], endpoint)
 
     def _endpoint(self, service_id, endpoint):
         attributes = {key: value for key, value in endpoint.items()
@@ -262,6 +283,8 @@ class Bootstrapper:
             self.catalog_api.update_endpoint)
 
     def _scoped_resource(self, kind, resource):
+        if kind != 'project':
+            self._check_identity_domain(resource['domain'])
         domain_id = self._domain_id(resource['domain'])
         attributes = {key: value for key, value in resource.items()
                       if key != 'domain'}

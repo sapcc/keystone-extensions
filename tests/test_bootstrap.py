@@ -206,6 +206,125 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
             write.assert_not_called()
         self.assertEqual(original, self.data)
 
+    def test_missing_group_does_not_block_later_grants(self):
+        config, driver = self.ldap_config()
+
+        def get_group(name, domain_id):
+            if name == 'MISSING_GROUP':
+                raise exception.GroupNotFound(group_id=name)
+            return {'id': 'directory-local-group', 'name': name}
+
+        driver.get_group_by_name.side_effect = get_group
+        self.data['role_assignments'].insert(0, {
+            'group': {'name': 'MISSING_GROUP', 'domain': 'ccadmin'},
+            'domain': 'ccadmin', 'role': 'admin',
+        })
+        with mock.patch.object(bootstrap, 'LOG') as log:
+            with self.assertRaises(bootstrap.BootstrapError) as error:
+                self.bootstrap.apply(self.data)
+
+        PROVIDERS.assignment_api.get_grant(
+            self.native.admin_role_id, user_id=self.native.admin_user_id,
+            domain_id='default')
+        domain = PROVIDERS.resource_api.get_domain_by_name('ccadmin')
+        group = PROVIDERS.identity_api.get_group_by_name(
+            'CCADMIN_CLOUD_ADMINS', domain['id'])
+        project = PROVIDERS.resource_api.get_project_by_name(
+            'cloud_admin', domain['id'])
+        PROVIDERS.assignment_api.get_grant(
+            self.native.admin_role_id, group_id=group['id'],
+            project_id=project['id'])
+        self.assertIn('1 bootstrap operation(s) failed', str(error.exception))
+        self.assertIn('MISSING_GROUP', str(log.error.call_args_list))
+        driver.create_group.assert_not_called()
+
+    def test_failed_project_does_not_block_resources_and_can_be_retried(self):
+        self.data['projects'].insert(
+            0, {'name': 'temporarily-unavailable', 'domain': 'Default'})
+        create_project = PROVIDERS.resource_api.create_project
+        secret = 'password-must-not-appear-in-bootstrap-errors'
+
+        def fail_one_project(project_id, project):
+            if project['name'] == 'temporarily-unavailable':
+                raise RuntimeError(secret)
+            return create_project(project_id, project)
+
+        with mock.patch.object(PROVIDERS.resource_api, 'create_project',
+                               side_effect=fail_one_project), \
+                mock.patch.object(bootstrap, 'LOG') as log:
+            with self.assertRaises(bootstrap.BootstrapError) as error:
+                self.bootstrap.apply(self.data)
+
+        project = PROVIDERS.resource_api.get_project_by_name(
+            'service', 'default')
+        group = PROVIDERS.identity_api.get_group_by_name(
+            'administrators', 'default')
+        PROVIDERS.assignment_api.get_grant(
+            self.native.admin_role_id, group_id=group['id'],
+            project_id=project['id'])
+        self.assertIn('1 bootstrap operation(s) failed', str(error.exception))
+        self.assertIn('projects[0]', str(log.error.call_args_list))
+        self.assertNotIn(secret, str(log.error.call_args_list))
+        self.assertNotIn(secret, str(error.exception))
+
+        self.bootstrap.apply(self.data)
+        PROVIDERS.resource_api.get_project_by_name(
+            'temporarily-unavailable', 'default')
+        self.assertEqual(project['id'], PROVIDERS.resource_api.
+                         get_project_by_name('service', 'default')['id'])
+        self.assertEqual(group['id'], PROVIDERS.identity_api.
+                         get_group_by_name('administrators', 'default')['id'])
+
+    def test_failed_endpoint_does_not_block_sibling_endpoints(self):
+        self.data['services'].append({'name': 'other', 'type': 'other'})
+        with mock.patch.object(PROVIDERS.catalog_api, 'update_endpoint',
+                               side_effect=RuntimeError('endpoint failed')), \
+                mock.patch.object(bootstrap, 'LOG') as log:
+            with self.assertRaises(bootstrap.BootstrapError) as error:
+                self.bootstrap.apply(self.data)
+
+        endpoints = [endpoint for endpoint in
+                     PROVIDERS.catalog_api.list_endpoints()
+                     if endpoint['service_id'] == self.native.service_id]
+        self.assertEqual({'public', 'admin', 'internal'},
+                         {endpoint['interface'] for endpoint in endpoints})
+        services = PROVIDERS.catalog_api.list_services()
+        self.assertIn('other', {service['name'] for service in services})
+        PROVIDERS.identity_api.get_group_by_name('administrators', 'default')
+        self.assertIn('1 bootstrap operation(s) failed', str(error.exception))
+        self.assertIn('endpoints[0]', str(log.error.call_args_list))
+
+    def test_failed_domain_config_blocks_only_dependent_identity_work(self):
+        config, driver = self.ldap_config()
+        driver.get_group_by_name.side_effect = lambda name, domain_id: {
+            'id': 'directory-local-' + name, 'name': name}
+        self.data['domains'].append({'name': 'later-domain'})
+        self.data['groups'].append(
+            {'name': 'must-use-ldap', 'domain': 'ccadmin'})
+        with mock.patch.object(PROVIDERS.domain_config_api, 'update_config',
+                               side_effect=RuntimeError('config failed')), \
+                mock.patch.object(bootstrap, 'LOG') as log:
+            self.assertRaises(bootstrap.BootstrapError,
+                              self.bootstrap.apply, self.data)
+
+        PROVIDERS.resource_api.get_domain_by_name('later-domain')
+        PROVIDERS.assignment_api.get_grant(
+            self.native.admin_role_id, user_id=self.native.admin_user_id,
+            domain_id='default')
+        domain = PROVIDERS.resource_api.get_domain_by_name('ccadmin')
+        self.assertRaises(exception.GroupNotFound,
+                          PROVIDERS.identity_api.get_group_by_name,
+                          'must-use-ldap', domain['id'])
+        self.assertIn('Identity configuration for domain ccadmin failed',
+                      str(log.error.call_args_list))
+
+        self.bootstrap.apply(self.data)
+        self.assertEqual(config, PROVIDERS.domain_config_api.
+                         get_config_with_sensitive_info(domain['id']))
+        group = PROVIDERS.identity_api.get_group_by_name(
+            'must-use-ldap', domain['id'])
+        self.assertNotEqual('directory-local-must-use-ldap', group['id'])
+
     def test_consecutive_cli_processes_are_idempotent(self):
         self.ldap_config()
         root = Path(__file__).resolve().parents[1]
@@ -397,10 +516,12 @@ class BootstrapTests(unit.SQLDriverOverrides, unit.TestCase):
         config, driver = self.ldap_config()
         driver.get_group_by_name.side_effect = exception.GroupNotFound(
             group_id='CCADMIN_CLOUD_ADMINS')
-        with self.assertRaises(bootstrap.BootstrapError) as error:
-            self.bootstrap.apply(self.data)
-        self.assertIn('CCADMIN_CLOUD_ADMINS', str(error.exception))
-        self.assertIn('ccadmin', str(error.exception))
+        with mock.patch.object(bootstrap, 'LOG') as log:
+            with self.assertRaises(bootstrap.BootstrapError) as error:
+                self.bootstrap.apply(self.data)
+        self.assertIn('2 bootstrap operation(s) failed', str(error.exception))
+        self.assertIn('CCADMIN_CLOUD_ADMINS', str(log.error.call_args_list))
+        self.assertIn('ccadmin', str(log.error.call_args_list))
         driver.create_group.assert_not_called()
 
     def test_database_domain_driver_configuration_is_required(self):
