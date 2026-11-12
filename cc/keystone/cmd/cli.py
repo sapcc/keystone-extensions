@@ -34,6 +34,7 @@ from cryptography import fernet
 
 from kubernetes import client, config
 
+from . import doctor
 from ..middleware import lifesaver_utils
 
 CID_REGEX = r'^[C-D|I]\d+$'
@@ -51,6 +52,28 @@ class BaseApp(object):
         parser = subparsers.add_parser(cls.name, help=cls.__doc__)
         parser.set_defaults(cmd_class=cls)
         return parser
+
+
+class Doctor(BaseApp):
+    """Diagnose common problems with keystone deployments."""
+
+    name = 'doctor'
+
+    @classmethod
+    def add_argument_parser(cls, subparsers):
+        parser = super(Doctor, cls).add_argument_parser(subparsers)
+        parser.add_argument(
+            '--ignore', nargs='?', action='append', default=[],
+            metavar='SYMPTOM',
+            help='Repeatable argument naming a check (including symptom_) to '
+                 'ignore for the exit status. Ignored checks still run and '
+                 'report warnings to stdout.')
+        return parser
+
+    @staticmethod
+    def main():
+        raise SystemExit(doctor.diagnose())
+
 
 class UserScore(BaseApp):
     """Get Lifesaver score"""
@@ -463,6 +486,7 @@ class FernetTokenDoctor(BaseApp):
 
 
 CMDS = [
+    Doctor,
     RepairAssignments,
     RepairIdMappings,
     RotateSecretKeys,
