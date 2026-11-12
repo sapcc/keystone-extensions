@@ -34,6 +34,7 @@ from cryptography import fernet
 
 from kubernetes import client, config
 
+from cc.keystone.cmd import bootstrap
 from ..middleware import lifesaver_utils
 
 CID_REGEX = r'^[C-D|I]\d+$'
@@ -51,6 +52,43 @@ class BaseApp(object):
         parser = subparsers.add_parser(cls.name, help=cls.__doc__)
         parser.set_defaults(cmd_class=cls)
         return parser
+
+
+class Bootstrap(BaseApp):
+    """Reconcile the deployment-rendered Keystone bootstrap configuration."""
+
+    name = 'bootstrap'
+
+    @classmethod
+    def add_argument_parser(cls, subparsers):
+        parser = super(Bootstrap, cls).add_argument_parser(subparsers)
+        parser.add_argument(
+            '--bootstrap-file', default='/etc/keystone/bootstrap.yaml',
+            help='Rendered bootstrap YAML (default: %(default)s).')
+        return parser
+
+    @staticmethod
+    def main():
+        try:
+            bootstrap.run(CONF.command.bootstrap_file)
+        except bootstrap.BootstrapError as error:
+            LOG.error('Keystone bootstrap failed: %s', error)
+            raise SystemExit(1)
+        finally:
+            try:
+                project_id = bootstrap.get_cloud_admin_project_id()
+            except Exception as error:
+                # Backend exceptions may contain credentials or SQL parameters.
+                print('Cannot look up project cloud_admin in domain ccadmin '
+                      '(%s)' % type(error).__name__)
+            else:
+                if project_id is None:
+                    print('Project cloud_admin in domain ccadmin '
+                          'was not found')
+                else:
+                    print('Project cloud_admin in domain ccadmin: %s' %
+                          project_id)
+
 
 class UserScore(BaseApp):
     """Get Lifesaver score"""
@@ -463,6 +501,7 @@ class FernetTokenDoctor(BaseApp):
 
 
 CMDS = [
+    Bootstrap,
     RepairAssignments,
     RepairIdMappings,
     RotateSecretKeys,
