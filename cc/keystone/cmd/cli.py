@@ -36,7 +36,7 @@ from kubernetes import client, config
 
 from cc.keystone.cmd import doctor
 from cc.keystone.cmd import bootstrap
-from ..middleware import lifesaver_utils
+from cc.keystone.middleware import lifesaver_utils
 
 CID_REGEX = r'^[C-D|I]\d+$'
 T_REGEX = r'^T[A-F0-9]+$'
