@@ -34,7 +34,8 @@ from cryptography import fernet
 
 from kubernetes import client, config
 
-from . import doctor
+from cc.keystone.cmd import doctor
+from cc.keystone.cmd import bootstrap
 from ..middleware import lifesaver_utils
 
 CID_REGEX = r'^[C-D|I]\d+$'
@@ -53,7 +54,6 @@ class BaseApp(object):
         parser.set_defaults(cmd_class=cls)
         return parser
 
-
 class Doctor(BaseApp):
     """Diagnose common problems with keystone deployments."""
 
@@ -69,11 +69,45 @@ class Doctor(BaseApp):
                  'ignore for the exit status. Ignored checks still run and '
                  'report warnings to stdout.')
         return parser
-
+        
     @staticmethod
     def main():
         raise SystemExit(doctor.diagnose())
 
+class Bootstrap(BaseApp):
+    """Reconcile the deployment-rendered Keystone bootstrap configuration."""
+
+    name = 'bootstrap'
+
+    @classmethod
+    def add_argument_parser(cls, subparsers):
+        parser = super(Bootstrap, cls).add_argument_parser(subparsers)
+        parser.add_argument(
+            '--bootstrap-file', default='/etc/keystone/bootstrap.yaml',
+            help='Rendered bootstrap YAML (default: %(default)s).')
+        return parser
+
+    @staticmethod
+    def main():
+        try:
+            bootstrap.run(CONF.command.bootstrap_file)
+        except bootstrap.BootstrapError as error:
+            LOG.error('Keystone bootstrap failed: %s', error)
+            raise SystemExit(1)
+        finally:
+            try:
+                project_id = bootstrap.get_cloud_admin_project_id()
+            except Exception as error:
+                # Backend exceptions may contain credentials or SQL parameters.
+                print('Cannot look up project cloud_admin in domain ccadmin '
+                      '(%s)' % type(error).__name__)
+            else:
+                if project_id is None:
+                    print('Project cloud_admin in domain ccadmin '
+                          'was not found')
+                else:
+                    print('Project cloud_admin in domain ccadmin: %s' %
+                          project_id)
 
 class UserScore(BaseApp):
     """Get Lifesaver score"""
@@ -91,7 +125,7 @@ class UserScore(BaseApp):
     def main():
         utils = lifesaver_utils.LifesaverUtils(conf={})
         user = utils.normalize(CONF.command.user)
-        user_score = utils.get_user_score(user)
+        user_score = utils.get_score(user)
 
         print(user_score.get())
 
@@ -185,11 +219,11 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for user %s (%s)" % (
-                            e.message, assignment['user_id'], assignment))
+                            str(e), assignment['user_id'], assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for user %s (%s)" % (
-                            e.message, assignment['user_id'], assignment))
+                            str(e), assignment['user_id'], assignment))
                     assignment_manager.driver.delete_user_assignments(
                         assignment['user_id'])
 
@@ -197,11 +231,11 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for group %s (%s)" % (
-                            e.message, assignment['group_id'], assignment))
+                            str(e), assignment['group_id'], assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for group %s (%s)" % (
-                            e.message, assignment['group_id'], assignment))
+                            str(e), assignment['group_id'], assignment))
                     assignment_manager.driver.delete_group_assignments(
                         assignment['group_id'])
 
@@ -209,12 +243,12 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for domain %s (%s)" % (
-                            e.message, assignment['domain_id'],
+                            str(e), assignment['domain_id'],
                             assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for domain %s (%s)" % (
-                            e.message, assignment['domain_id'],
+                            str(e), assignment['domain_id'],
                             assignment))
                     assignment_manager.driver.delete_domain_assignments(
                         assignment['domain_id'])
@@ -223,12 +257,12 @@ class RepairAssignments(BaseApp):
                 if CONF.command.dry_run:
                     LOG.warning(
                         "%s -> found orphaned role-assignments for project %s (%s)" % (
-                            e.message, assignment['project_id'],
+                            str(e), assignment['project_id'],
                             assignment))
                 else:
                     LOG.warning(
                         "%s -> deleting role-assignments for project %s (%s)" % (
-                            e.message, assignment['project_id'],
+                            str(e), assignment['project_id'],
                             assignment))
                     assignment_manager.driver.delete_project_assignments(
                         assignment['project_id'])
@@ -385,7 +419,7 @@ class RotateSecretKeys(BaseApp):
             keys[new_primary_key] = keys.pop(0)
             LOG.info('Promoted key 0 to be the primary: %s %s' % (new_primary_key, keys[new_primary_key]))
 
-            if secret.metadata.annotations.has_key('max_active_keys'):
+            if 'max_active_keys' in secret.metadata.annotations:
                 max_active_keys = int(secret.metadata.annotations['max_active_keys'])
 
                 # purge excess keys
@@ -487,6 +521,7 @@ class FernetTokenDoctor(BaseApp):
 
 CMDS = [
     Doctor,
+    Bootstrap,
     RepairAssignments,
     RepairIdMappings,
     RotateSecretKeys,

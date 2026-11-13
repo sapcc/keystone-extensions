@@ -108,11 +108,11 @@ class Password(base.AuthMethodHandler):
                 ('%s:%s' % (username, password)).encode('utf-8')).strip())
 
             response = requests.post(CONF.cc_password.url,
-                                    headers={
-                                        'Content-Type': 'application/json; charset=utf-8',
-                                        'Authorization': basic_auth
-                                    },
-                                    verify=CONF.cc_password.secure)
+                                     headers={
+                                         'Content-Type': 'application/json; charset=utf-8',
+                                         'Authorization': basic_auth
+                                     },
+                                     verify=CONF.cc_password.secure)
 
             if response.status_code == 401:
                 msg = _('Invalid username or password')
