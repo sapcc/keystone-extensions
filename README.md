@@ -14,6 +14,7 @@ The keystone-manage-extension cli provides
 
 - a extended bootstrap command that takes care of giving the bootstrap user domain admin permissions
 - a repair_assignments command to do a emergency role assignment cleanup after AD objects have been deleted that still have references to them
+- a doctor command with repeatable `--ignore` support for deployment checks
 
 The auth plugins provide:
 
@@ -27,6 +28,24 @@ The lifesaver middleware protects against abusive requests and rejects requests 
 Install the python package into the keystone (virtual) environment
 
     pip install git+https://github.com/sapcc/keystone-extensions.git
+
+
+### The doctor command
+
+Run the installed Keystone deployment checks with support for ignoring selected
+symptoms when determining the exit status, ahead of upstream availability:
+
+```sh
+keystone-manage-extension --config-file /etc/keystone/keystone.conf doctor \
+  --ignore symptom_caching_disabled \
+  --ignore symptom_debug_mode_is_enabled
+```
+
+Each `--ignore` takes an exact check function name, including the `symptom_`
+prefix. Ignored checks still run and print their warnings, followed by a notice
+that they are ignored for the exit condition. The command exits with status 1 if
+any non-ignored symptom is found, or 0 otherwise. Without `--ignore`, it behaves
+like `keystone-manage doctor`.
 
 
 ### Identity Driver

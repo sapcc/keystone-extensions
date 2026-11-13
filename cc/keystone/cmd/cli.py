@@ -34,8 +34,9 @@ from cryptography import fernet
 
 from kubernetes import client, config
 
+from cc.keystone.cmd import doctor
 from cc.keystone.cmd import bootstrap
-from ..middleware import lifesaver_utils
+from cc.keystone.middleware import lifesaver_utils
 
 CID_REGEX = r'^[C-D|I]\d+$'
 T_REGEX = r'^T[A-F0-9]+$'
@@ -53,6 +54,25 @@ class BaseApp(object):
         parser.set_defaults(cmd_class=cls)
         return parser
 
+class Doctor(BaseApp):
+    """Diagnose common problems with keystone deployments."""
+
+    name = 'doctor'
+
+    @classmethod
+    def add_argument_parser(cls, subparsers):
+        parser = super(Doctor, cls).add_argument_parser(subparsers)
+        parser.add_argument(
+            '--ignore', nargs='?', action='append', default=[],
+            metavar='SYMPTOM',
+            help='Repeatable argument naming a check (including symptom_) to '
+                 'ignore for the exit status. Ignored checks still run and '
+                 'report warnings to stdout.')
+        return parser
+        
+    @staticmethod
+    def main():
+        raise SystemExit(doctor.diagnose())
 
 class Bootstrap(BaseApp):
     """Reconcile the deployment-rendered Keystone bootstrap configuration."""
@@ -88,7 +108,6 @@ class Bootstrap(BaseApp):
                 else:
                     print('Project cloud_admin in domain ccadmin: %s' %
                           project_id)
-
 
 class UserScore(BaseApp):
     """Get Lifesaver score"""
@@ -501,6 +520,7 @@ class FernetTokenDoctor(BaseApp):
 
 
 CMDS = [
+    Doctor,
     Bootstrap,
     RepairAssignments,
     RepairIdMappings,
