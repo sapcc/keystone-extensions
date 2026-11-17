@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Check AD clearance before assigning roles to ccadmin users and groups."""
+"""Protect admin domains and check AD clearance before assigning roles."""
 
 from oslo_log import log
 from oslo_policy import policy
@@ -24,47 +24,83 @@ from keystone import exception
 PROVIDERS = provider_api.ProviderAPIs
 LOG = log.getLogger(__name__)
 
-# Fixed domain and AD group for this first version.
+# Fixed admin domains and AD group for this first version.
+ADMIN_DOMAINS = ('Default', 'ccadmin')
 RESTRICTED_DOMAIN = 'ccadmin'
 CLEARANCE_GROUP = 'SCI_OPENSTACK_EU-DE-1_CCADMIN-DOMAIN_USER'
 
 
 class ClearanceCheck(policy.Check):
-    """Check the user or group getting a role with cc_clearance:recipient."""
+    """Check who can get a role and where the role can be assigned."""
 
     def __call__(self, target, creds, enforcer, current_rule=None):
-        if self.match != 'recipient':
+        if self.match not in ('recipient', 'domain_boundary'):
             return False
 
         try:
+            if self.match == 'domain_boundary':
+                return self._domain_boundary(target, current_rule)
             return self._unrestricted_recipient(target)
         except exception.NotFound:
-            # The group is missing, or the user is not a member.
+            # A domain or group is missing, or the user is not a member.
             return False
         except Exception as error:
             # Log only the error type; messages may contain passwords.
-            LOG.error('Could not check clearance (%s)',
+            LOG.error('Could not check role assignment (%s)',
                       type(error).__name__)
             return False
 
-    def _unrestricted_recipient(self, target):
+    def _recipient_domain(self, target):
         # Keystone supplies the user or group details in these policy fields.
         user_id = target.get('target.user.id')
         group_id = target.get('target.group.id')
         if bool(user_id) == bool(group_id):
-            return False
+            return None
 
         recipient_type = 'user' if user_id else 'group'
         domain_id = target.get('target.%s.domain_id' % recipient_type)
         if not domain_id:
+            return None
+        return PROVIDERS.resource_api.get_domain(domain_id)
+
+    def _domain_boundary(self, target, current_rule):
+        recipient_domain = self._recipient_domain(target)
+        if not recipient_domain:
             return False
 
-        domain = PROVIDERS.resource_api.get_domain(domain_id)
+        # System grants can give access across every domain.
+        if current_rule in (
+            'identity:create_system_grant_for_user',
+            'identity:create_system_grant_for_group',
+        ):
+            return recipient_domain['name'] in ADMIN_DOMAINS
+
+        project_id = target.get('target.project.id')
+        domain_id = target.get('target.domain.id')
+        if bool(project_id) == bool(domain_id):
+            return False
+        if project_id:
+            domain_id = target.get('target.project.domain_id')
+        if not domain_id:
+            return False
+
+        target_domain = PROVIDERS.resource_api.get_domain(domain_id)
+        if target_domain['name'] not in ADMIN_DOMAINS:
+            return True
+        return recipient_domain['name'] in ADMIN_DOMAINS
+
+    def _unrestricted_recipient(self, target):
+        domain = self._recipient_domain(target)
+        if not domain:
+            return False
         if domain['name'] != RESTRICTED_DOMAIN:
             return True
 
+        user_id = target.get('target.user.id')
+        group_id = target.get('target.group.id')
         identity = PROVIDERS.identity_api
-        clearance_group = identity.get_group_by_name(CLEARANCE_GROUP, domain_id)
+        clearance_group = identity.get_group_by_name(
+            CLEARANCE_GROUP, domain['id'])
         clearance_group_id = clearance_group['id']
 
         if user_id:

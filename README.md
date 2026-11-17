@@ -39,17 +39,38 @@ The driver extends the standard keystone LDAP driver, so all [configuration
 options of the LDAP driver](http://docs.openstack.org/developer/keystone/configuration.html#configuring-the-ldap-identity-provider) also apply to the CC_AD driver.
 
 
-### The cc_clearance policy check
+### The cc_clearance policy checks
 
-Use `cc_clearance:recipient` in Keystone policy to limit which roles people in
-`ccadmin` can receive:
+The plugin provides two checks. Use both in Keystone policy.
+
+#### Keep admin access in admin domains
+
+`cc_clearance:domain_boundary` checks where a role is being assigned:
+
+- On a project in `Default` or `ccadmin`, the user or group getting the role must
+  belong to either `Default` or `ccadmin`.
+- The same rule applies to roles assigned on those domains, including inherited
+  roles, and to system-wide roles.
+- On projects and domains elsewhere, this check passes. The usual Keystone
+  permission checks still apply.
+
+For now, `Default` and `ccadmin` are fixed in the code as the admin domains. These
+names match the domains listed in eu-de-1's `adminDomainIds` setting. The plugin
+does not read that setting yet. Service accounts in `Default` can still receive
+roles in `ccadmin`, and recipients in `ccadmin` can receive roles in `Default`.
+Users from other domains cannot receive even `member` on an admin-domain project.
+
+#### Limit roles for uncleared ccadmin users
+
+`cc_clearance:recipient` checks who is getting a role:
 
 - Users in the AD clearance group can receive any role allowed by the usual
   Keystone rules.
 - Other users in `ccadmin` can receive only the roles listed in policy.
-- Users and groups in other domains pass this extra check.
+- Users and groups outside `ccadmin` pass the clearance check. They must still
+  pass the domain check above.
 
-For now, the domain name `ccadmin` and the AD group name
+For the clearance check, the domain name `ccadmin` and the AD group name
 `SCI_OPENSTACK_EU-DE-1_CCADMIN-DOMAIN_USER` are fixed in the code. This is the group
 used for eu-de-1 ccadmin access. The check uses Keystone's existing AD connection
 to look up the group and its members.
@@ -62,11 +83,11 @@ small role list.
 If user or group details are missing, or a lookup fails, the check returns false.
 Being in a technical-user login group does not count as clearance.
 
-The domain that matters is where the user or group belongs. For example, a role
-given to a `ccadmin` user is checked even if the project is in another domain.
-The person giving the role must still have permission to do so.
+The clearance check uses the domain where the user or group belongs. For example,
+a role given to a `ccadmin` user is checked even if the project is in another
+domain. The person giving the role must still have permission to do so.
 
-#### Enable the check
+#### Enable the checks
 
 Install the updated package, add the rules below to the chosen region's policy
 file, and restart the Keystone workers. Keystone loads the plugin automatically;
@@ -83,11 +104,13 @@ ccadmin_narrow_roles: >-
 ccadmin_recipient_ok: "rule:ccadmin_narrow_roles or cc_clearance:recipient"
 ```
 
-Decide which roles to allow and where they may be assigned. Add this condition
-to the existing rules for assigning roles:
+Decide which roles to allow and where they may be assigned. Add both checks to
+the existing rules for assigning roles:
 
 ```text
-(<current rule>) and rule:ccadmin_recipient_ok
+(<current rule>)
+and cc_clearance:domain_boundary
+and rule:ccadmin_recipient_ok
 ```
 
 Do this for:
@@ -96,17 +119,19 @@ Do this for:
 - `identity:create_system_grant_for_user`
 - `identity:create_system_grant_for_group`
 
-Keep the whole current rule inside the parentheses. This makes the extra check
-apply even when a cloud administrator gives someone a role.
+Keep the whole current rule inside the parentheses, including the existing
+`adminDomainIds` and role-blocklist checks. Both new checks must pass even when
+a cloud administrator gives someone a role. Keep `cc_clearance:domain_boundary`
+outside the allowed-role condition so that an allowed role cannot bypass it.
 `identity:create_grant` covers both ordinary and inherited project/domain roles.
 
 #### What this checks
 
-The check runs when a role is assigned through the Keystone API:
+These checks run when a role is assigned through the Keystone API:
 
-- It checks the group members Keystone can find at that time. Later membership
-  changes need separate monitoring.
-- It does not remove old assignments, change implied roles or revoke tokens.
+- The clearance check uses the group members Keystone can find at that time.
+  Later membership changes need separate monitoring.
+- They do not remove old assignments, change implied roles or revoke tokens.
 - Bootstrap and other direct calls to Keystone's internal managers skip API
   policy checks.
 
