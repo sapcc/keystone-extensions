@@ -1,6 +1,6 @@
 # Converged Cloud Keystone Extensions
 
-Provides a custom identity driver, auth plugins, lifesaver middleware and keystone-manage-extension cli for keystone.
+Provides a custom identity driver, auth plugins, policy checks, lifesaver middleware and keystone-manage-extension cli for keystone.
 
 The identity driver supports:
 
@@ -36,6 +36,69 @@ and configure one or more domains to use the **cc_ldap** driver (instead of the 
 
 The driver extends the standard keystone LDAP driver, so all [configuration
 options of the LDAP driver](http://docs.openstack.org/developer/keystone/configuration.html#configuring-the-ldap-identity-provider) also apply to the CC_AD driver.
+
+
+### The cc_clearance policy check
+
+`cc_clearance:recipient` checks whether a grant recipient is eligible for roles
+outside a narrow allowlist. It is discovered through the `oslo.policy.rule_checks`
+entry point; installing the updated package and referencing the check in policy
+requires no Keystone source changes.
+
+This prototype hardcodes the recipient identity domain `ccadmin` and the clearance
+group `SCI_OPENSTACK_EU-DE-1_CCADMIN-DOMAIN_USER`, used for eu-de-1 ccadmin access.
+It resolves the group and membership through Keystone's configured identity
+backend, including `cc_ldap`, using its existing AD connection.
+
+The check returns true for:
+
+- Recipients whose identity domain is not `ccadmin`.
+- Users in `ccadmin` who belong to the clearance group.
+- The clearance group itself, or another nonempty `ccadmin` group whose currently
+  resolved members all belong to the clearance group.
+
+Other recipients in `ccadmin` return false. Missing recipient metadata, a missing
+clearance group, and backend lookup failures also return false. Other LDAP login
+exceptions, such as technical-user groups, do not establish clearance.
+
+The restriction follows the **recipient's identity domain**, regardless of the
+caller's domain or the scope receiving the role assignment. A cleared recipient
+still needs the usual grant authorization to succeed.
+
+#### Policy wiring
+
+The narrow role allowlist belongs in the deployment's policy. For example:
+
+```yaml
+ccadmin_narrow_roles: >-
+  'registry_viewer':%(target.role.name)s or
+  'registry_pusher':%(target.role.name)s or
+  'objectstore_viewer':%(target.role.name)s or
+  'objectstore_admin':%(target.role.name)s
+ccadmin_recipient_ok: "rule:ccadmin_narrow_roles or cc_clearance:recipient"
+```
+
+Choose the actual allowed role/scope combinations for the deployment. Wrap the
+existing expression for each grant-creation policy and append the new condition:
+
+```text
+(<existing authorization expression>) and rule:ccadmin_recipient_ok
+```
+
+Apply this to `identity:create_grant`, `identity:create_system_grant_for_user`, and
+`identity:create_system_grant_for_group`. The existing caller authorization and
+other grant restrictions must remain inside the parenthesized expression so that
+even a cloud administrator must satisfy the recipient restriction. Ordinary and
+inherited project/domain grant endpoints share `identity:create_grant`.
+
+Installing the package alone does not activate the restriction. Deploy the policy
+in the intended region and restart workers after installing the updated package.
+
+This is a grant-time check. Existing assignments, later AD membership changes,
+role implications and token revocation remain under separate operational
+controls. Group membership is evaluated as resolved by the identity backend at
+the time of the grant, not as a guarantee about future members. Internal manager
+calls, including bootstrap, do not pass through API policy enforcement.
 
 
 ### The cc_password, cc_radius and cc_x509 auth plugins
