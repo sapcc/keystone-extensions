@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Grant-time eligibility for roles outside the ccadmin narrow allowlist."""
+"""Check AD clearance before assigning roles to ccadmin users and groups."""
 
 from oslo_log import log
 from oslo_policy import policy
@@ -24,13 +24,13 @@ from keystone import exception
 PROVIDERS = provider_api.ProviderAPIs
 LOG = log.getLogger(__name__)
 
-# Prototype defaults: resolve names through Keystone's configured backends.
+# Fixed domain and AD group for this first version.
 RESTRICTED_DOMAIN = 'ccadmin'
 CLEARANCE_GROUP = 'SCI_OPENSTACK_EU-DE-1_CCADMIN-DOMAIN_USER'
 
 
 class ClearanceCheck(policy.Check):
-    """Implement ``cc_clearance:recipient`` using the grant recipient."""
+    """Check the user or group getting a role with cc_clearance:recipient."""
 
     def __call__(self, target, creds, enforcer, current_rule=None):
         if self.match != 'recipient':
@@ -39,16 +39,16 @@ class ClearanceCheck(policy.Check):
         try:
             return self._unrestricted_recipient(target)
         except exception.NotFound:
-            # Includes a missing clearance group or absent user membership.
+            # The group is missing, or the user is not a member.
             return False
         except Exception as error:
-            # Backend exception text can contain LDAP credentials or SQL data.
-            LOG.error('Unable to check recipient clearance (%s)',
+            # Log only the error type; messages may contain passwords.
+            LOG.error('Could not check clearance (%s)',
                       type(error).__name__)
             return False
 
     def _unrestricted_recipient(self, target):
-        # These fields are populated and flattened by Keystone's grant APIs.
+        # Keystone supplies the user or group details in these policy fields.
         user_id = target.get('target.user.id')
         group_id = target.get('target.group.id')
         if bool(user_id) == bool(group_id):
@@ -74,8 +74,8 @@ class ClearanceCheck(policy.Check):
         if group_id == clearance_group_id:
             return True
 
-        # Group grants are eligible only when all currently resolved members
-        # are cleared. Membership changes after the grant need separate control.
+        # Every member Keystone can find must be in the clearance group.
+        # Later membership changes need separate checks.
         members = identity.list_users_in_group(group_id)
         if not members:
             return False
