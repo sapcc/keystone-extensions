@@ -1,5 +1,6 @@
 oslo.config
 oslo.log
+oslo.policy>=4.5.0 # Apache-2.0
 oslo.middleware>=3.31.0 # Apache-2.0
 py-radius
 requests
