@@ -25,6 +25,7 @@ PROVIDERS = provider_api.ProviderAPIs
 LOG = log.getLogger(__name__)
 
 # Fixed admin domains and AD group for this first version.
+# The grant boundary covers both domains; AD clearance only applies to ccadmin.
 ADMIN_DOMAINS = ('Default', 'ccadmin')
 RESTRICTED_DOMAIN = 'ccadmin'
 CLEARANCE_GROUP = 'SCI_OPENSTACK_EU-DE-1_CCADMIN-DOMAIN_USER'
@@ -51,9 +52,10 @@ class ClearanceCheck(policy.Check):
             return False
 
     def _recipient_domain(self, target):
-        # Keystone supplies the user or group details in these policy fields.
+        # Keystone grant APIs supply exactly one user or group in the target.
         user_id = target.get('target.user.id')
         group_id = target.get('target.group.id')
+        # Reject missing or ambiguous recipients.
         if bool(user_id) == bool(group_id):
             return None
 
@@ -107,16 +109,5 @@ class ClearanceCheck(policy.Check):
             identity.check_user_in_group(user_id, clearance_group_id)
             return True
 
-        if group_id == clearance_group_id:
-            return True
-
-        # Every member Keystone can find must be in the clearance group.
-        # Later membership changes need separate checks.
-        members = identity.list_users_in_group(group_id)
-        if not members:
-            return False
-        cleared_ids = {
-            user['id']
-            for user in identity.list_users_in_group(clearance_group_id)
-        }
-        return all(user['id'] in cleared_ids for user in members)
+        # Only the clearance group can receive roles outside the policy list.
+        return group_id == clearance_group_id

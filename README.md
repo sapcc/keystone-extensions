@@ -60,6 +60,9 @@ does not read that setting yet. Service accounts in `Default` can still receive
 roles in `ccadmin`, and recipients in `ccadmin` can receive roles in `Default`.
 Users from other domains cannot receive even `member` on an admin-domain project.
 
+The domain boundary protects grants in both admin domains. The clearance check
+below applies only to recipients in `ccadmin`.
+
 #### Limit roles for uncleared ccadmin users
 
 `cc_clearance:recipient` checks who is getting a role:
@@ -75,10 +78,9 @@ For the clearance check, the domain name `ccadmin` and the AD group name
 used for eu-de-1 ccadmin access. The check uses Keystone's existing AD connection
 to look up the group and its members.
 
-For groups in `ccadmin`, the check passes for the clearance group itself. It also
-passes for another group if that group is not empty and every member Keystone
-can find belongs to the clearance group. Other groups are limited to the same
-small role list.
+For groups in `ccadmin`, only the clearance group itself passes. Other groups
+are limited to the small role list, even if all their current members are
+cleared. A grant belongs to the group and also applies to members added later.
 
 If user or group details are missing, or a lookup fails, the check returns false.
 Being in a technical-user login group does not count as clearance.
@@ -93,7 +95,8 @@ Install the updated package, add the rules below to the chosen region's policy
 file, and restart the Keystone workers. Keystone loads the plugin automatically;
 no Keystone code changes are needed.
 
-Choose the roles that users outside the clearance group may receive. For example:
+Choose the roles that uncleared users and other `ccadmin` groups may receive.
+For example:
 
 ```yaml
 ccadmin_narrow_roles: >-
@@ -129,7 +132,7 @@ outside the allowed-role condition so that an allowed role cannot bypass it.
 
 These checks run when a role is assigned through the Keystone API:
 
-- The clearance check uses the group members Keystone can find at that time.
+- The clearance check uses AD membership when a user receives a role.
   Later membership changes need separate monitoring.
 - They do not remove old assignments, change implied roles or revoke tokens.
 - Bootstrap and other direct calls to Keystone's internal managers skip API
