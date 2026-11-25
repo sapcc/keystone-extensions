@@ -139,14 +139,16 @@ def extract_s3_ec2_credentials(request):
     Returns:
         tuple: (user with prefix 's3creds-' or 'ec2creds-', domain) or (None, None) if not found
     """
-    if (('/v3/s3tokens' == request.path or
-                   '/v3/ec2tokens' == request.path) and
-                  'POST' == request.method):
+    if (request.path in ('/v3/s3tokens', '/v3/ec2tokens') and
+            request.method == 'POST'):
 
         try:
             body = request.json_body
         except Exception:
             # Failed to parse JSON body
+            return None, None
+
+        if not isinstance(body, dict):
             return None, None
 
         # The order is taken from EC2_S3_Resource.py in keystone
@@ -156,13 +158,16 @@ def extract_s3_ec2_credentials(request):
             body.get('ec2Credentials')
         )
 
-        if not credentials or 'access' not in credentials:
+        if not isinstance(credentials, dict):
+            return None, None
+        access = credentials.get('access')
+        if not isinstance(access, str) or not access:
             return None, None
 
         # Determine prefix based on path
         prefix = 's3creds' if request.path == '/v3/s3tokens' else 'ec2creds'
 
-        user = prefix + '-' + credentials['access']
+        user = prefix + '-' + access
         domain = 'unknown'  # ec2tokens and s3tokens API are domain unaware
 
         return user, domain
@@ -240,7 +245,7 @@ def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_
         status_code: HTTP status code (int)
         user_identifier: User string (used to determine if token-based)
         status_cost_config: Dict of status codes to costs for regular users
-        token_cost_config: Dict of status codes to costs for token users
+        token_cost_config: Costs for token and S3/EC2 credential validation
 
     Returns:
         int: Cost to deduct from user's credit
@@ -250,7 +255,7 @@ def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_
         return 0
 
     # Determine which cost table to use based on user prefix
-    if user_identifier.startswith(FTOKENCREDS_PREFIX):
+    if user_identifier.startswith((FTOKENCREDS_PREFIX, 'S3CREDS-', 'EC2CREDS-')):
         cost_table = token_cost_config
     else:
         cost_table = status_cost_config

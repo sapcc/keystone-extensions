@@ -20,7 +20,8 @@ The auth plugins provide:
  - Radius / SecurID authentication
  - Password authentication with optional password validation against EWS and mirroring the externally validated password to LDAP
 
-The lifesaver middleware protects against abusive requests and rejects requests from users that have depleted their credit.
+The Lifesaver middleware contains repeated failures from misconfigured scripts
+by rejecting requests from subjects that have depleted their failure credit.
 
 ## Installation
 
@@ -84,13 +85,18 @@ To use the cc_x509 plugin, it needs to be configured in keystone.conf:
 
 ### The lifesaver middleware
 
-Introduces a concept of user punishment for requests that caused an error.
+Each subject starts with configurable credit, replenished by a fixed amount
+at a fixed interval. Responses with status >= 400 deduct their configured
+cost; successful responses are free. An exhausted subject receives HTTP 429
+at admission until its next refill. `Retry-After` reports the remaining whole
+seconds until that refill. Rejected requests do not spend credit or delay refill.
 
-The cost of each error type (identified by a response status >= 400) can be configured.
-
-A user starts with a configurable initial credit, that is refilled by a configurable amount in a configurable interval.
-
-Once a user has consumed all his credit and causes an error, his requests are blocked (rejected with a 429) until his credit has been refilled.
+`status_cost` applies to ordinary user/API errors. `token_cost` applies to
+`FTOKENCREDS-`, `S3CREDS-` and `EC2CREDS-` subjects. Thus missing S3/EC2 access
+keys cost 10 credits by default while ordinary API resource-lookup 404s are free.
+S3/EC2 subjects represent access keys, independently of the caller's service
+token. Their domain is `UNKNOWN`; allowlisting the caller does not exempt the
+credential subject.
 
 The middleware is configured in keystone.conf:
 
@@ -112,16 +118,39 @@ The middleware is configured in keystone.conf:
     refill_amount = 5
     # cost of each status
     status_cost = default:1,401:10,403:5,404:0,429:0
+    # cost of token and S3/EC2 credential validation failures
+    token_cost = default:1,401:10,403:5,404:10,429:0
 
-The middleware is enabled by adding it to paste.ini:
+The paired Keystone Flask middleware loader installs these phases:
 
-    [filter:lifesaver]
-    use = egg:keystone-extensions#lifesaver
+```text
+Request ID / size checks / URL normalization
+  -> Lifesaver (phase=pre_auth)
+  -> AuthContext
+  -> Watcher
+  -> Lifesaver (default phase=post_auth)
+  -> API
+```
 
+The early phase owns canonical POST `/v3/s3tokens` and `/v3/ec2tokens` requests
+with an extractable access key, including the `credential` and `ec2Credentials`
+payload aliases. It checks the shared score before service-token validation
+and accounts for the final response once. Other requests retain late,
+authenticated-identity accounting. Admitted responses keep their original
+status, headers and body even if concurrent failures exhaust the same score.
 
-    [pipeline:api_v3]
-    # The last item in this pipeline must be service_v3 or an equivalent
-    # application. It cannot be a filter.
-    pipeline = healthcheck cors sizelimit http_proxy_to_wsgi osprofiler url_normalize request_id lifesaver build_auth_context token_auth json_body ec2_extension_v3 s3_extension service_v3
+Deploy both the Keystone loader change and this extension together. A legacy
+single middleware instance remains supported and uses late-phase behaviour.
 
-or via flask [ugly hardcoding](https://github.com/sapcc/keystone/blob/0cedc509def82d28737f9f7dfd105ec528060f18/keystone/server/flask/core.py#L76-L80)
+Scores are shared through Memcached. Positive charges use fresh `gets`/CAS
+updates, with `add` for initialization, at most three attempts and a 100 ms
+socket timeout. Cache misses, eviction, outages or persistent write contention
+fail open. Concurrent requests already admitted may complete together; this
+is a failure-credit budget rather than an exact requests-per-second limit.
+
+Early rejections bypass Watcher. They emit the StatsD counter
+`openstack_lifesaver.early_rejections_total` to the same local exporter
+(`127.0.0.1:9125`). Prometheus exposes
+`openstack_lifesaver_early_rejections_total` with only `endpoint`
+(`s3tokens` or `ec2tokens`) and `reason` (`credit` or `blocklist`) labels.
+Per-request rejection and credit diagnostics are DEBUG logs.

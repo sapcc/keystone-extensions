@@ -13,6 +13,7 @@
 # under the License.
 
 
+from datadog.dogstatsd import DogStatsd
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -22,10 +23,9 @@ from . import lifesaver_utils as utils
 from . import response
 from .lifesaver_logic import calculate_cost
 from .lifesaver_logic import FTOKENCREDS_PREFIX
-from .lifesaver_logic import should_update_score_metadata
-from cc.keystone.middleware import score
 
 CONF = keystone.conf.CONF
+REQUEST_STATE = 'lifesaver.state'
 
 
 class LifesaverMiddleware(base.ConfigurableMiddleware):
@@ -35,11 +35,14 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         self.logger = log.getLogger(__name__)
         self.app = app
         self.utils = utils.LifesaverUtils(conf)
-
-        # default responses
-        self.ratelimit_response = response.RateLimitExceededResponse()
-        self.ratelimit_response.set_retry_after(self.utils.refill_time)
-        self.blocklist_response = response.BlocklistResponse()
+        self.phase = conf.get('phase', 'post_auth')
+        if self.phase == 'pre_auth':
+            # Use the same local StatsD exporter as Watcher. Early rejections
+            # never reach Watcher and have no authenticated identity labels.
+            self.metric_client = DogStatsd(
+                host=conf.get('statsd_host', '127.0.0.1'),
+                port=int(conf.get('statsd_port', 9125)),
+                namespace='openstack_lifesaver')
 
         if CONF.debug:
             self.logger.debug('enabled? {0}'.format(self.utils.enabled))
@@ -69,21 +72,24 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         domain = None
 
         try:
-            subject, domain = logic.extract_password_auth_credentials(request)
-            if not subject:
-                subject = logic.extract_app_credential(request)
-            if not subject:
-                token_id = logic.extract_token_id(request)
-                if token_id:
-                    token_hash = self.utils.hash_token_id(token_id)
-                    subject = FTOKENCREDS_PREFIX + token_hash
-            if not subject:
+            if self.phase == 'pre_auth':
                 subject, domain = logic.extract_s3_ec2_credentials(request)
-            if not subject:
-                subject, domain = logic.extract_from_authentication_request(request)
+            else:
+                subject, domain = logic.extract_password_auth_credentials(request)
+                if not subject:
+                    subject = logic.extract_app_credential(request)
+                if not subject:
+                    token_id = logic.extract_token_id(request)
+                    if token_id:
+                        token_hash = self.utils.hash_token_id(token_id)
+                        subject = FTOKENCREDS_PREFIX + token_hash
+                if not subject:
+                    subject, domain = logic.extract_s3_ec2_credentials(request)
+                if not subject:
+                    subject, domain = logic.extract_from_authentication_request(request)
         except Exception as e:
-            self.logger.error("Could not extract credentials from request: %s %s %s" % (
-                request.method, request.path, e))
+            self.logger.debug("Could not extract credentials from request: %s %s %s",
+                              request.method, request.path, e)
 
         if not subject:
             subject = ''
@@ -93,84 +99,79 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         return {'subject': self.utils.normalize(subject), 'domain': self.utils.normalize(domain)}
 
     def process_request(self, request):
-        return self.verify_request(request)
+        if not self.utils.enabled:
+            return None
+
+        # An early owner accounts even for responses returned by AuthContext.
+        # Keep ownership separate from the legacy positive-charge marker.
+        if REQUEST_STATE in request.environ or 'lifesaver' in request.environ:
+            return None
+        credentials = self.get_subject(request)
+        if not credentials or not credentials['subject']:
+            return None
+
+        state = dict(credentials, owner=self, accounted=False)
+        request.environ[REQUEST_STATE] = state
+        subject, domain = state['subject'], state['domain']
+        if (domain and domain in self.utils.domain_allowlist or
+                subject in self.utils.user_allowlist):
+            state['accounted'] = True
+            return None
+
+        if subject in self.utils.user_blocklist:
+            state['accounted'] = True
+            self.logger.debug("Request from blocklisted subject %s rejected", subject)
+            self.record_early_rejection(request, 'blocklist')
+            return response.BlocklistResponse(headers=[('Vary', 'X-Auth-Token')])
+
+        subject_score = self.utils.get_score(subject)
+        if subject_score.get() <= 0:
+            state['accounted'] = True
+            self.logger.debug("Blocking request %s %s: subject %s %s has no credit",
+                              request.method, request.path, subject, domain)
+            self.record_early_rejection(request, 'credit')
+            # Early responses also bypass AuthContext's response headers.
+            result = response.RateLimitExceededResponse(
+                headers=[('Vary', 'X-Auth-Token')])
+            result.set_retry_after(subject_score.retry_after())
+            return result
+        return None
 
     def process_response(self, response, request=None):
-        return self.verify_request(request, response)
+        if request is None:
+            return response
+        state = request.environ.get(REQUEST_STATE)
+        if not state or state['owner'] is not self or state['accounted']:
+            return response
 
-    def get_costs(self, request, response, subject, domain, subject_score):
+        state['accounted'] = True
         cost = calculate_cost(
             response.status_code,
-            subject,
+            state['subject'],
             self.utils.status_cost,
             self.utils.token_cost
         )
-
-        # deduct subject credit
         if cost > 0:
-            # mark request as processed
+            subject = state['subject']
             request.environ['lifesaver'] = subject
-            subject_score.reduce(cost)
-            # update score metadata in case the configuration has changed
-            if should_update_score_metadata(
-                subject_score,
-                self.utils.credit,
-                self.utils.refill_time,
-                self.utils.refill_amount
-            ):
-                subject_score.credit = self.utils.credit
-                subject_score.refill_time = self.utils.refill_time
-                subject_score.refill_amount = self.utils.refill_amount
+            remaining = self.utils.deduct_credit(subject, cost)
+            if remaining is not None:
+                self.logger.debug("%s %s has credit %d after %s %s returned %d",
+                                  subject, state['domain'], remaining.get(),
+                                  request.method, request.path, response.status_code)
+        # Admission is final: never replace a downstream response with a 429.
+        return response
 
-            self.utils.set_score(subject, subject_score)
-            self.logger.info("%s %s has a remaining credit of %d - request %s %s returned %d" % (
-                            subject, domain, subject_score.get(), request.method, request.path,
-                            response.status_code))
-
-    def verify_request(self, request, response=None):
-        """
-        Verifies if the request should be denied
-        :param request:
-        :param response:
-        :return:
-        """
-        result = response
-
-        if not self.utils.enabled:
-            return result
-
-        # skip requests that have been processed already elsewhere in the middleware pipeline
-        if 'lifesaver' in request.environ:
-            return result
-
-        credentials = self.get_subject(request)
-        if credentials:
-            domain = credentials['domain']
-            if domain and credentials['domain'] in self.utils.domain_allowlist:
-                return result
-
-            subject = credentials['subject']
-            if subject:
-                # request from allowlisted subject?
-                if credentials['subject'] in self.utils.user_allowlist:
-                    return result
-
-                # request from blocklisted subject?
-                if credentials['subject'] in self.utils.user_blocklist:
-                    self.logger.info("Request from blocklisted subject %s rejected" % subject)
-                    return self.blocklist_response
-
-                subject_score: score.Score = self.utils.get_score(credentials['subject'])
-
-                if subject_score.get() <= 0:
-                    self.logger.info("Blocking request %s %s, since subject %s %s has no credit left" % (
-                    request.method, request.path, subject, domain))
-                    return self.ratelimit_response
-
-                if response:
-                    self.get_costs(request, response, subject, domain, subject_score)
-
-        return result
+    def record_early_rejection(self, request, reason):
+        if self.phase != 'pre_auth':
+            return
+        try:
+            self.metric_client.increment(
+                'early_rejections_total',
+                tags=['endpoint:' + request.path.rsplit('/', 1)[-1],
+                      'reason:' + reason])
+        except Exception:
+            self.logger.debug('Could not submit Lifesaver metric', exc_info=True)
 
     @classmethod
     def factory(cls, global_config, **local_config):
