@@ -84,7 +84,7 @@ class LifesaverUtils(object):
     def get_score(self, user) -> score.Score:
         key = self.get_memcache_key(user)
         try:
-            # Admission does not need a CAS token or a cache write.
+            # Checking whether to accept a request only needs a cache read.
             score_result = self.memcached.get(key)
         except Exception:
             LOG.debug('Lifesaver cache read failed; admitting request', exc_info=True)
@@ -94,10 +94,11 @@ class LifesaverUtils(object):
         return score_result
 
     def deduct_credit(self, user, cost):
-        """Charge a completed request using fresh, shared failure credit.
+        """Deduct a completed request's cost from the shared cached balance.
 
-        Cache failures and sustained contention fail open. In-flight requests
-        can finish after exhaustion; their responses must still be delivered.
+        Read the latest balance before each update attempt. Return None if the
+        cache fails or all attempts fail. The caller must keep the original
+        response, even if another request has used all remaining credit.
         """
         key = self.get_memcache_key(user)
         expiration_time = self.credit * self.refill_time * self.refill_amount
@@ -114,8 +115,8 @@ class LifesaverUtils(object):
                     current.refill_time = self.refill_time
                     current.refill_amount = self.refill_amount
 
-                # add() prevents two initializers from overwriting each other.
-                # A failed add/CAS always retries with a fresh score.
+                # add() preserves an entry created by another request.
+                # Read the latest balance again before retrying a failed update.
                 if cached is None:
                     stored = self.memcached.add(key, current, expiration_time)
                 else:
@@ -125,8 +126,8 @@ class LifesaverUtils(object):
         except Exception:
             LOG.debug('Lifesaver cache update failed', exc_info=True)
         finally:
-            # python-memcached keeps CAS tokens in a thread-local dictionary.
-            # Retain them only for this bounded read/modify/write operation.
+            # python-memcached stores CAS tokens separately for each thread.
+            # Clear them so tokens from old requests do not remain in memory.
             self.memcached.reset_cas()
         return None
 

@@ -38,7 +38,7 @@ class Score(object):
         )
 
     def retry_after(self):
-        """Whole seconds until the next refill of an exhausted score."""
+        """Return seconds until the next credit refill, rounded up to at least 1."""
         return max(1, math.ceil(self.last_update + self.refill_time - time.time()))
 
     def reduce(self, consumption):

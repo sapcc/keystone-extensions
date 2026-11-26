@@ -245,7 +245,7 @@ def calculate_cost(status_code, user_identifier, status_cost_config, token_cost_
         status_code: HTTP status code (int)
         user_identifier: User string (used to determine if token-based)
         status_cost_config: Dict of status codes to costs for regular users
-        token_cost_config: Costs for token and S3/EC2 credential validation
+        token_cost_config: Credit costs for failed token or S3/EC2 credential validation
 
     Returns:
         int: Cost to deduct from user's credit

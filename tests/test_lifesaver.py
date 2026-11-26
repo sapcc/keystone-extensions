@@ -26,7 +26,7 @@ from cc.keystone.middleware import score
 
 
 class MemoryCache:
-    """Memcached copy/CAS semantics with a deterministic competing reader."""
+    """Copy cached values and simulate two requests updating the same key."""
 
     def __init__(self, store):
         self.store = store
@@ -102,7 +102,7 @@ class LifesaverTestCase(unittest.TestCase):
         self.clock = mock.patch.object(score.time, 'time', return_value=100.)
         self.now = self.clock.start()
         self.addCleanup(self.clock.stop)
-        # Register options before overriding them, just as Keystone does.
+        # Register options before changing their values, as Keystone does.
         lifesaver_utils.LifesaverUtils({})
         for name, value in {
             'enabled': 'true', 'initial_credit': 100, 'refill_seconds': 10,
@@ -139,6 +139,17 @@ class LifesaverTestCase(unittest.TestCase):
                 self.assertEqual(404, result.status_int)
                 subject = ('S3' if endpoint == 's3tokens' else 'EC2')
                 self.assertEqual(90, self.balance(subject + 'CREDS-TEST-KEY'))
+
+    def test_legacy_loader_retains_authenticated_filtering(self):
+        middleware = lifesaver.LifesaverMiddleware.factory({})(
+            webob.Response(status=403))
+        request = webob.Request.blank('/v3/projects', environ={
+            'KEYSTONE_AUTH_CONTEXT': {},
+            'HTTP_X_USER_NAME': 'ordinary-user',
+            'HTTP_X_USER_DOMAIN_NAME': 'ordinary-domain',
+        })
+        self.assertEqual(403, request.get_response(middleware).status_int)
+        self.assertEqual(95, self.balance('ORDINARY-USER'))
 
     def test_admitted_response_survives_concurrent_exhaustion(self):
         for status in (200, 201, 401, 404):
@@ -328,7 +339,7 @@ class LifesaverTestCase(unittest.TestCase):
 
     def test_expired_score_starts_with_initial_credit(self):
         self.seed(0)
-        self.store.clear()  # Expiration or eviction of this isolated cache.
+        self.store.clear()  # Simulate a cache entry that has expired.
         self.assertEqual(404, self.request().get_response(self.middleware).status_int)
 
     def test_cache_read_errors_fail_open(self):

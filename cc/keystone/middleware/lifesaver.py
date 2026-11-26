@@ -37,8 +37,9 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         self.utils = utils.LifesaverUtils(conf)
         self.phase = conf.get('phase', 'post_auth')
         if self.phase == 'pre_auth':
-            # Use the same local StatsD exporter as Watcher. Early rejections
-            # never reach Watcher and have no authenticated identity labels.
+            # Send rejection metrics to the same StatsD exporter as Watcher.
+            # Watcher does not see requests rejected here. Authentication has
+            # not run yet, so these metrics have no user or domain labels.
             self.metric_client = DogStatsd(
                 host=conf.get('statsd_host', '127.0.0.1'),
                 port=int(conf.get('statsd_port', 9125)),
@@ -102,8 +103,9 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         if not self.utils.enabled:
             return None
 
-        # An early owner accounts even for responses returned by AuthContext.
-        # Keep ownership separate from the legacy positive-charge marker.
+        # REQUEST_STATE records which filter handles the request's response,
+        # including errors from AuthContext. Skip requests assigned to a filter.
+        # The older 'lifesaver' flag means credit has already been deducted.
         if REQUEST_STATE in request.environ or 'lifesaver' in request.environ:
             return None
         credentials = self.get_subject(request)
@@ -130,7 +132,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
             self.logger.debug("Blocking request %s %s: subject %s %s has no credit",
                               request.method, request.path, subject, domain)
             self.record_early_rejection(request, 'credit')
-            # Early responses also bypass AuthContext's response headers.
+            # Early rejections skip AuthContext, so add the Vary header here.
             result = response.RateLimitExceededResponse(
                 headers=[('Vary', 'X-Auth-Token')])
             result.set_retry_after(subject_score.retry_after())
@@ -159,7 +161,8 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                 self.logger.debug("%s %s has credit %d after %s %s returned %d",
                                   subject, state['domain'], remaining.get(),
                                   request.method, request.path, response.status_code)
-        # Admission is final: never replace a downstream response with a 429.
+        # Return the original response. Do not replace it with HTTP 429 if
+        # the credit balance reached zero while this request was running.
         return response
 
     def record_early_rejection(self, request, reason):

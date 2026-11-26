@@ -297,8 +297,9 @@ class TestLifesaverE2E(unittest.TestCase):
         - s3_credentials: Extracts S3 access key from body
         - ec2_credentials: Extracts EC2 access key from body
         
-        Assert the expected failure before 429 so caller-policy errors cannot
-        substitute for the missing S3/EC2 credential lookup being exercised.
+        First check the expected error, then check for HTTP 429.
+        For S3 and EC2, a missing-credential error confirms that credential
+        lookup ran. A caller permission error does not prove this.
         """
         print("\n" + "=" * 60)
         print("TEST: Rate limiting across different authentication methods")
@@ -338,7 +339,8 @@ class TestLifesaverE2E(unittest.TestCase):
             with self.subTest(auth_method=name):
                 print(f"\nTesting: {name}")
                 
-                # Every scenario owns a unique subject; no shared cache reset.
+                # Use different credentials so each scenario has its own score
+                # and does not need to clear the shared cache.
                 rate_limited, attempts = self._run_until_rate_limited(
                     method, endpoint, payload, headers, expected_failure)
                 
@@ -348,7 +350,7 @@ class TestLifesaverE2E(unittest.TestCase):
                 )
     
     def test_credit_refill_over_time(self):
-        """Honouring Retry-After allows the next authentication attempt."""
+        """Allow a new request after waiting for Retry-After seconds."""
         print("\n" + "=" * 60)
         print("TEST: Credit refill over time")
         print("=" * 60)

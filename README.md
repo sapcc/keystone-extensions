@@ -139,8 +139,10 @@ and accounts for the final response once. Other requests retain late,
 authenticated-identity accounting. Admitted responses keep their original
 status, headers and body even if concurrent failures exhaust the same score.
 
-Deploy both the Keystone loader change and this extension together. A legacy
-single middleware instance remains supported and uses late-phase behaviour.
+Keystone loaders that check the middleware instance's `phase` retain the single
+authenticated filter with older extensions. Older Keystone loaders also remain
+supported through the default late phase. Early rejection requires both the
+updated loader and this extension; either can be upgraded first.
 
 Scores are shared through Memcached. Positive charges use fresh `gets`/CAS
 updates, with `add` for initialization, at most three attempts and a 100 ms
