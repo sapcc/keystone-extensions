@@ -19,11 +19,31 @@ git+https://github.com/sapcc/keystone-extensions.git@stable/2025.1-m3#egg=keysto
 **running the E2E Tests:**
 while keystone local instance is running move to the **keystone-extensions** repository and execute:
 ```
-python -m unittest tests.test_lifesaver_e2e -v 
+python -m unittest discover -s tests -p test_lifesaver_e2e.py -v
 ```
 of course you also need to create a virtual environment and install python dependencies before that.
 
-this would be a correct output:
+## Verification for early S3/EC2 filtering
+
+Use a dedicated instance with the updated Keystone loader and this extension.
+Test subjects must not be allowlisted. S3/EC2 cases use a valid caller token and
+require missing-key HTTP 404 responses before HTTP 429; permission errors cannot
+satisfy the test. The suite uses unique subjects without flushing Memcached,
+deletes its application credential, and checks refill after `Retry-After`.
+
+For local logic and middleware tests, run in the Keystone environment with this
+checkout installed:
+
+```sh
+python -m unittest discover -s tests -p test_lifesaver_logic.py
+python -m unittest discover -s tests -p test_lifesaver.py
+```
+
+The paired Keystone tests in `keystone.tests.unit.test_lifesaver.S3LifesaverCore`
+exercise the real Flask, AuthContext and SQL path with Memcached mocked.
+Early rejections bypass Watcher, so its metrics do not cover that path.
+
+The output below is an example. Timing depends on the Lifesaver configuration.
 ```
 $ python -m unittest tests.test_lifesaver_e2e -v
 test_credit_refill_over_time (tests.test_lifesaver_e2e.TestLifesaverE2E)

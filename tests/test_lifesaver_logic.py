@@ -15,6 +15,7 @@
 import unittest
 import os
 import importlib.util
+from types import SimpleNamespace
 
 # Load the module directly from file path, bypassing forced
 # package imports that would cause a need for unnecessary mocking.
@@ -165,6 +166,32 @@ class TestExtractS3Ec2Credentials(unittest.TestCase):
         self.assertEqual(user, "ec2creds-ec2-access-key-456")
         self.assertEqual(domain, "unknown")
 
+    def test_payload_aliases(self):
+        for endpoint in ('s3tokens', 'ec2tokens'):
+            for alias in ('credentials', 'credential', 'ec2Credentials'):
+                with self.subTest(endpoint=endpoint, alias=alias):
+                    request = SimpleNamespace(
+                        path='/v3/' + endpoint, method='POST',
+                        json_body={alias: {'access': 'CaseSensitiveKey'}})
+                    subject, domain = (
+                        lifesaver_logic.extract_s3_ec2_credentials(request))
+                    prefix = 's3creds' if endpoint == 's3tokens' else 'ec2creds'
+                    self.assertEqual(prefix + '-CaseSensitiveKey', subject)
+                    self.assertEqual('unknown', domain)
+
+    def test_malformed_credentials_have_no_subject(self):
+        bodies = [None, [], 'text', 42, {}, {'credentials': 'access'},
+                  {'credentials': ['access']}, {'credentials': {'access': 42}},
+                  {'credentials': {'access': None}},
+                  {'credentials': {'access': ''}}]
+        for body in bodies:
+            with self.subTest(body=body):
+                request = SimpleNamespace(
+                    path='/v3/s3tokens', method='POST', json_body=body)
+                self.assertEqual(
+                    (None, None),
+                    lifesaver_logic.extract_s3_ec2_credentials(request))
+
 
 class TestCalculateCost(unittest.TestCase):
     """Test cost calculation logic"""
@@ -181,7 +208,8 @@ class TestCalculateCost(unittest.TestCase):
         status_cost = {'default': 1, '404': 0}
         token_cost = {'default': 1, '404': 10}
 
-        cost = lifesaver_logic.calculate_cost(404, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER-123', status_cost, token_cost)
+        cost = lifesaver_logic.calculate_cost(
+            404, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER-123', status_cost, token_cost)
 
         self.assertEqual(cost, 10)
 
@@ -193,11 +221,23 @@ class TestCalculateCost(unittest.TestCase):
 
         self.assertEqual(cost, 0)
 
+    def test_credential_validation_uses_token_cost(self):
+        status_cost = {'default': 1, '401': 2, '403': 3, '404': 0}
+        token_cost = {'default': 4, '401': 10, '403': 5, '404': 10}
+        for prefix in ('S3CREDS-', 'EC2CREDS-'):
+            for status in (401, 403, 404, 500):
+                with self.subTest(prefix=prefix, status=status):
+                    self.assertEqual(
+                        token_cost.get(str(status), token_cost['default']),
+                        lifesaver_logic.calculate_cost(
+                            status, prefix + 'KEY', status_cost, token_cost))
+
     def test_401_for_token_user(self):
         status_cost = {'default': 1, '401': 10}
         token_cost = {'default': 1, '401': 15}
 
-        cost = lifesaver_logic.calculate_cost(401, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER', status_cost, token_cost)
+        cost = lifesaver_logic.calculate_cost(
+            401, lifesaver_logic.FTOKENCREDS_PREFIX + 'USER', status_cost, token_cost)
 
         self.assertEqual(cost, 15)
 

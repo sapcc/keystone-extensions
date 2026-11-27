@@ -33,7 +33,7 @@ import unittest
 import requests
 import os
 import time
-import memcache
+import uuid
 
 
 # Payloads
@@ -135,13 +135,12 @@ class TestLifesaverE2E(unittest.TestCase):
     """End-to-end tests against real Keystone instance with Lifesaver middleware"""
     
     # Configuration constants
-    MAX_RATE_LIMIT_ATTEMPTS = 50
-    REFILL_WAIT_SECONDS = 20
+    MAX_RATE_LIMIT_ATTEMPTS = int(os.getenv('LIFESAVER_MAX_ATTEMPTS', '200'))
     
     @classmethod
     def setUpClass(cls):
         """Set up test environment - check if Keystone is running"""
-        cls.auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3')
+        cls.auth_url = os.getenv('OS_AUTH_URL', 'http://localhost:8000/v3').rstrip('/')
         cls.admin_user = os.getenv('OS_USERNAME', 'admin')
         cls.admin_password = os.getenv('OS_PASSWORD', 's3cr3t')
         cls.domain = os.getenv('OS_USER_DOMAIN_NAME', 'Default')
@@ -149,11 +148,6 @@ class TestLifesaverE2E(unittest.TestCase):
         cls.project_domain = os.getenv('OS_PROJECT_DOMAIN_NAME', 'Default')
         cls.project_domain_id = os.getenv('OS_PROJECT_DOMAIN_ID', 'default')
         cls.user_domain_id = os.getenv('OS_USER_DOMAIN_ID', 'default')
-        
-        # Set up memcache connection
-        cls.mc = memcache.Client(['127.0.0.1:11211'])
-        cls.mc.flush_all()
-        time.sleep(1)
         
         # Check if Keystone is running
         cls._verify_keystone_available()
@@ -177,24 +171,21 @@ class TestLifesaverE2E(unittest.TestCase):
     def setUp(self):
         """Set up each test"""
         self.session = requests.Session()
+        self.addCleanup(self.session.close)
         # Disable SSL warnings for local testing
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    def tearDown(self):
-        """Clean up after each test"""
-        self.session.close()
     
     # Helpers
 
     def _make_request(self, method, endpoint, payload=None, headers=None):
         """Make an HTTP request and return the response"""
         if method == 'POST':
-            return self.session.post(endpoint, json=payload, headers=headers, verify=False)
+            return self.session.post(endpoint, json=payload, headers=headers, verify=False, timeout=10)
         elif method == 'GET':
-            return self.session.get(endpoint, headers=headers, verify=False)
+            return self.session.get(endpoint, headers=headers, verify=False, timeout=10)
         elif method == 'DELETE':
-            return self.session.delete(endpoint, headers=headers, verify=False)
+            return self.session.delete(endpoint, headers=headers, verify=False, timeout=10)
         else:
             raise ValueError(f"Unsupported method: {method}")
     
@@ -246,7 +237,7 @@ class TestLifesaverE2E(unittest.TestCase):
         
         payload = {
             "application_credential": {
-                "name": f"test_ratelimit_{int(time.time())}",
+                "name": f"test_ratelimit_{uuid.uuid4().hex}",
                 "description": "Test app credential for rate limiting E2E test",
                 "roles": [{"name": "admin"}]
             }
@@ -261,12 +252,17 @@ class TestLifesaverE2E(unittest.TestCase):
         
         if response.status_code == 201:
             data = response.json()['application_credential']
+            self.addCleanup(
+                self._make_request, 'DELETE',
+                f"{self.auth_url}/users/{user_id}/application_credentials/{data['id']}",
+                headers={'X-Auth-Token': admin_token})
             print(f"  [App Cred Helper] Created app credential: {data['id'][:20]}...")
             return data['id'], data['secret']
         
         raise unittest.SkipTest(f"Failed to create app credential: {response.text}")
     
-    def _run_until_rate_limited(self, method, endpoint, payload=None, headers=None):
+    def _run_until_rate_limited(
+            self, method, endpoint, payload=None, headers=None, expected_failure=401):
         """
         Send requests until rate limited (429) or max attempts reached.
         Returns (rate_limited: bool, attempts: int)
@@ -278,8 +274,12 @@ class TestLifesaverE2E(unittest.TestCase):
                 print(f"    Attempt {i + 1}: Status {response.status_code}")
             
             if response.status_code == 429:
+                self.assertGreater(i, 0, "Fresh test subject was already throttled")
+                self.assertIsInstance(response.json(), dict)
+                self.assertIn('Retry-After', response.headers)
                 print(f"    Rate limited after {i + 1} attempts")
                 return True, i + 1
+            self.assertEqual(expected_failure, response.status_code, response.text)
         
         return False, self.MAX_RATE_LIMIT_ATTEMPTS
     
@@ -297,8 +297,9 @@ class TestLifesaverE2E(unittest.TestCase):
         - s3_credentials: Extracts S3 access key from body
         - ec2_credentials: Extracts EC2 access key from body
         
-        We don't test different failure reasons (expired, revoked, invalid) separately
-        because the middleware treats all 4xx responses equally.
+        First check the expected error, then check for HTTP 429.
+        For S3 and EC2, a missing-credential error confirms that credential
+        lookup ran. A caller permission error does not prove this.
         """
         print("\n" + "=" * 60)
         print("TEST: Rate limiting across different authentication methods")
@@ -310,37 +311,38 @@ class TestLifesaverE2E(unittest.TestCase):
         
         print("\nPreparing test data...")
         self._app_cred_id, _ = self._create_app_credential()
+        unique = uuid.uuid4().hex
+        caller_headers = {"X-Auth-Token": valid_auth_token}
         
         scenarios = [
             ("password_auth", "POST", f"{self.auth_url}/auth/tokens",
-             password_auth_payload("test_user", "wrong_password", self.user_domain_id), None),
+             password_auth_payload(f"test_user_{unique}", "wrong_password", self.user_domain_id), None, 401),
             
             ("token_auth_body", "POST", f"{self.auth_url}/auth/tokens",
-             token_auth_payload("invalid-token-id"), None),
+             token_auth_payload(f"invalid-token-{unique}"), None, 404),
             
             ("token_auth_header", "GET", f"{self.auth_url}/auth/tokens",
-             None, {"X-Auth-Token": valid_auth_token, "X-Subject-Token": "invalid-token"}),
+             None, {**caller_headers, "X-Subject-Token": f"invalid-subject-{unique}"}, 404),
             
             ("app_credential", "POST", f"{self.auth_url}/auth/tokens",
-             app_credential_payload(self._app_cred_id, "wrong-secret-for-testing"), None),
+             app_credential_payload(self._app_cred_id, "wrong-secret-for-testing"), None, 401),
             
             ("s3_credentials", "POST", f"{self.auth_url}/s3tokens",
-             s3_credentials_payload("fake_s3_access", "fake_s3_secret"), None),
+             s3_credentials_payload(f"missing_s3_{unique}", "unused"), caller_headers, 404),
             
             ("ec2_credentials", "POST", f"{self.auth_url}/ec2tokens",
-             ec2_credentials_payload("fake_ec2_access", "fake_ec2_secret", "fake_sig"), None),
+             ec2_credentials_payload(f"missing_ec2_{unique}", "unused", "fake_sig"), caller_headers, 404),
         ]
         
         # Test each scenario
-        for name, method, endpoint, payload, headers in scenarios:
+        for name, method, endpoint, payload, headers, expected_failure in scenarios:
             with self.subTest(auth_method=name):
                 print(f"\nTesting: {name}")
                 
-                # Reset rate limit state
-                self.mc.flush_all()
-                time.sleep(0.5)
-                
-                rate_limited, attempts = self._run_until_rate_limited(method, endpoint, payload, headers)
+                # Use different credentials so each scenario has its own score
+                # and does not need to clear the shared cache.
+                rate_limited, attempts = self._run_until_rate_limited(
+                    method, endpoint, payload, headers, expected_failure)
                 
                 self.assertTrue(
                     rate_limited,
@@ -348,16 +350,13 @@ class TestLifesaverE2E(unittest.TestCase):
                 )
     
     def test_credit_refill_over_time(self):
-        """Test that credits refill over time allowing requests again
-        You might need to check what is configured in keystone instance as
-        refill_seconds and adjust REFILL_WAIT_SECONDS accordingly.
-        """
+        """Allow a new request after waiting for Retry-After seconds."""
         print("\n" + "=" * 60)
         print("TEST: Credit refill over time")
         print("=" * 60)
         
         # Use unique user to avoid interference
-        test_user = f"test_refill_user_{int(time.time())}"
+        test_user = f"test_refill_user_{uuid.uuid4().hex}"
         payload = password_auth_payload(test_user, "wrong_password", self.user_domain_id)
         endpoint = f"{self.auth_url}/auth/tokens"
         
@@ -365,30 +364,22 @@ class TestLifesaverE2E(unittest.TestCase):
         print(f"\nPhase 1: Exhausting credits for user {test_user}...")
         rate_limited, _ = self._run_until_rate_limited('POST', endpoint, payload)
         
-        if not rate_limited:
-            self.skipTest("Could not trigger rate limiting in phase 1")
+        self.assertTrue(rate_limited, "Could not trigger rate limiting in phase 1")
         
         # Verify still rate limited
         response = self._make_request('POST', endpoint, payload)
         self.assertEqual(response.status_code, 429, "Should still be rate limited immediately after")
         
         # Phase 2: Wait for refill
-        print(f"\nPhase 2: Waiting {self.REFILL_WAIT_SECONDS} seconds for credit refill...")
-        for remaining in range(self.REFILL_WAIT_SECONDS, 0, -10):
-            print(f"  {remaining} seconds remaining...")
-            time.sleep(10)
+        wait_seconds = int(response.headers['Retry-After'])
+        self.assertGreater(wait_seconds, 0)
+        print(f"\nPhase 2: Waiting {wait_seconds} seconds for credit refill...")
+        time.sleep(wait_seconds + 0.1)
         
         # Phase 3: Verify refill
         print("\nPhase 3: Testing if credits have been refilled...")
         response = self._make_request('POST', endpoint, payload)
-        status = response.status_code
-        
-        if status == 401:
-            print("  Credits refilled! Now getting 401 instead of 429")
-        elif status == 429:
-            self.skipTest(f"Still rate limited after {self.REFILL_WAIT_SECONDS}s - check refill_seconds config")
-        
-        self.assertNotEqual(status, 429, "Should not be rate limited after refill period")
+        self.assertEqual(401, response.status_code, response.text)
 
 
 class TestLifesaverE2ESetup(unittest.TestCase):
@@ -403,7 +394,7 @@ class TestLifesaverE2ESetup(unittest.TestCase):
         try:
             response = requests.get(auth_url, timeout=5, verify=False)
             self.assertIn(response.status_code, [200, 300],
-                         f"Keystone should respond with 200/300, got {response.status_code}")
+                          f"Keystone should respond with 200/300, got {response.status_code}")
             print(f"  Keystone is accessible (status: {response.status_code})")
         except requests.exceptions.RequestException as e:
             self.fail(f"Cannot connect to Keystone at {auth_url}: {e}")

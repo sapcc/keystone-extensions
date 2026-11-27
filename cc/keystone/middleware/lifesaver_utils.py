@@ -17,11 +17,16 @@ import keystone.conf
 import memcache
 
 from oslo_config import cfg
+from oslo_log import log
 
 from . import score
 from .lifesaver_logic import hash_token_id
+from .lifesaver_logic import should_update_score_metadata
 
 CONF = keystone.conf.CONF
+LOG = log.getLogger(__name__)
+MAX_CAS_ATTEMPTS = 3
+
 
 class LifesaverUtils(object):
     def __init__(self, conf):
@@ -53,11 +58,13 @@ class LifesaverUtils(object):
                         help='Credit consumption by status for users'), group=group)
         CONF.register_opt(
             cfg.DictOpt('token_cost', default=conf.get('token_cost', "default:1,401:10,403:5,404:10,429:0"),
-                        help='Credit consumption by status for tokens'), group=group)
+                        help='Credit consumption by status for token and S3/EC2 credential validation'), group=group)
 
         self.enabled = CONF.lifesaver.enabled.lower() in ['true', '1', 't', 'y', 'yes']
 
-        self.memcached = memcache.Client(servers=[x.strip() for x in CONF.lifesaver.memcached.split(',')], debug=1)
+        self.memcached = memcache.Client(
+            servers=[x.strip() for x in CONF.lifesaver.memcached.split(',')],
+            cache_cas=True, socket_timeout=0.1)
 
         self.domain_allowlist = [self.normalize(x) for x in CONF.lifesaver.domain_allowlist.split(',')]
         self.user_allowlist = [self.normalize(x) for x in CONF.lifesaver.user_allowlist.split(',')]
@@ -76,15 +83,53 @@ class LifesaverUtils(object):
 
     def get_score(self, user) -> score.Score:
         key = self.get_memcache_key(user)
-        score_result = self.memcached.gets(key)
+        try:
+            # Checking whether to accept a request only needs a cache read.
+            score_result = self.memcached.get(key)
+        except Exception:
+            LOG.debug('Lifesaver cache read failed; admitting request', exc_info=True)
+            score_result = None
         if score_result is None or not isinstance(score_result, score.Score):
             score_result = score.Score(self.credit, self.refill_time, self.refill_amount)
         return score_result
 
-    def set_score(self, user, score_result):
+    def deduct_credit(self, user, cost):
+        """Deduct a completed request's cost from the shared cached balance.
+
+        Read the latest balance before each update attempt. Return None if the
+        cache fails or all attempts fail. The caller must keep the original
+        response, even if another request has used all remaining credit.
+        """
         key = self.get_memcache_key(user)
         expiration_time = self.credit * self.refill_time * self.refill_amount
-        self.memcached.set(key, score_result, expiration_time)
+        try:
+            for _ in range(MAX_CAS_ATTEMPTS):
+                cached = self.memcached.gets(key)
+                current = cached
+                if not isinstance(current, score.Score):
+                    current = score.Score(self.credit, self.refill_time, self.refill_amount)
+                current.reduce(cost)
+                if should_update_score_metadata(
+                        current, self.credit, self.refill_time, self.refill_amount):
+                    current.credit = self.credit
+                    current.refill_time = self.refill_time
+                    current.refill_amount = self.refill_amount
+
+                # add() preserves an entry created by another request.
+                # Read the latest balance again before retrying a failed update.
+                if cached is None:
+                    stored = self.memcached.add(key, current, expiration_time)
+                else:
+                    stored = self.memcached.cas(key, current, expiration_time)
+                if stored:
+                    return current
+        except Exception:
+            LOG.debug('Lifesaver cache update failed', exc_info=True)
+        finally:
+            # python-memcached stores CAS tokens separately for each thread.
+            # Clear them so tokens from old requests do not remain in memory.
+            self.memcached.reset_cas()
+        return None
 
     def normalize(self, string=''):
         return string.strip().upper()

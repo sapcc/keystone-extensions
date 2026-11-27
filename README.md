@@ -90,7 +90,14 @@ The cost of each error type (identified by a response status >= 400) can be conf
 
 A user starts with a configurable initial credit, that is refilled by a configurable amount in a configurable interval.
 
-Once a user has consumed all his credit and causes an error, his requests are blocked (rejected with a 429) until his credit has been refilled.
+Once a subject has consumed its credit, new requests receive HTTP 429 until
+credit has been refilled. Requests already admitted keep their original response.
+`Retry-After` remains the configured refill interval.
+
+`token_cost` applies to token and S3/EC2 credential failures. Missing access
+keys cost 10 credits by default; ordinary API 404s still use `status_cost` and
+are free by default. S3/EC2 credit is tracked by access key, not by the caller's
+token or username.
 
 The middleware is configured in keystone.conf:
 
@@ -112,6 +119,8 @@ The middleware is configured in keystone.conf:
     refill_amount = 5
     # cost of each status
     status_cost = default:1,401:10,403:5,404:0,429:0
+    # cost of token and S3/EC2 credential validation failures
+    token_cost = default:1,401:10,403:5,404:10,429:0
 
 The middleware is enabled by adding it to paste.ini:
 
@@ -125,3 +134,15 @@ The middleware is enabled by adding it to paste.ini:
     pipeline = healthcheck cors sizelimit http_proxy_to_wsgi osprofiler url_normalize request_id lifesaver build_auth_context token_auth json_body ec2_extension_v3 s3_extension service_v3
 
 or via flask [ugly hardcoding](https://github.com/sapcc/keystone/blob/0cedc509def82d28737f9f7dfd105ec528060f18/keystone/server/flask/core.py#L76-L80)
+
+The updated Keystone Flask loader adds a `pre_auth` filter after URL
+normalization and before AuthContext. It handles POST `/v3/s3tokens` and
+`/v3/ec2tokens` requests with an access key, checking credit before caller-token
+validation and accounting for the response once. Other requests retain their
+authenticated filtering. Older Keystone loaders use the default `post_auth`
+filter, including S3/EC2 handling. Early rejection requires both updates;
+either repository can be upgraded first.
+
+Credit deductions use bounded Memcached CAS updates to preserve concurrent
+charges. Cache failures admit requests and preserve downstream responses.
+Early rejections bypass Watcher and are not included in its metrics.

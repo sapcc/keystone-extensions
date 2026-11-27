@@ -12,7 +12,6 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import json
 from webob import Response
 
 
@@ -37,13 +36,14 @@ class RateLimitExceededResponse(Response):
                 status=status, headerlist=headers, content_type=content_type, body=body, charset="UTF-8"
             )
             return
-        elif not json_body:
-            content_type = "application/json"
-            json_body = {"error": {"status": status, "message": "Too Many Requests"}}
         super(RateLimitExceededResponse, self).__init__(
-            status=status, headerlist=headers, content_type=content_type,
-            json_body=json.dumps(json_body), charset="UTF-8",
+            status=status, headerlist=headers,
+            content_type=content_type or "application/json", charset="UTF-8",
         )
+        self.content_type = content_type or "application/json"
+        self.json_body = json_body or {
+            "error": {"code": self.status_int, "title": self.status[4:],
+                      "message": "Too Many Requests"}}
 
     def set_retry_after(self, retry_after):
         if not self.headerlist:
@@ -72,10 +72,11 @@ class BlocklistResponse(Response):
                 status=status, headerlist=headers, content_type=content_type, body=body, charset="UTF-8"
             )
             return
-        elif not json_body:
-            content_type = "application/json"
-            json_body = {"error": {"status": status, "message": "You have been blocklisted"}}
         super(BlocklistResponse, self).__init__(
-            status=status, headerlist=headers, content_type=content_type,
-            json_body=json.dumps(json_body), charset="UTF-8"
+            status=status, headerlist=headers,
+            content_type=content_type or "application/json", charset="UTF-8"
         )
+        self.content_type = content_type or "application/json"
+        self.json_body = json_body or {
+            "error": {"code": self.status_int, "title": self.status[4:],
+                      "message": "You have been blocklisted"}}
