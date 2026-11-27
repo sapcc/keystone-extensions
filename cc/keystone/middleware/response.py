@@ -46,7 +46,9 @@ class RateLimitExceededResponse(Response):
                       "message": "Too Many Requests"}}
 
     def set_retry_after(self, retry_after):
-        self.headers['Retry-After'] = str(retry_after)
+        if not self.headerlist:
+            self.headerlist = []
+        self.headerlist.append(('Retry-After', str(retry_after)))
 
 
 class BlocklistResponse(Response):

@@ -96,9 +96,6 @@ class LifesaverTestCase(unittest.TestCase):
             side_effect=lambda **kwargs: MemoryCache(self.store))
         patcher.start()
         self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(lifesaver, 'DogStatsd')
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.clock = mock.patch.object(score.time, 'time', return_value=100.)
         self.now = self.clock.start()
         self.addCleanup(self.clock.stop)
@@ -211,6 +208,30 @@ class LifesaverTestCase(unittest.TestCase):
         self.middleware.process_response(failure, request)
         self.assertEqual(90, self.balance())
 
+    def test_accounting_keeps_the_request_state_dictionary(self):
+        request = self.request()
+        self.middleware.process_request(request)
+        state = request.environ[lifesaver.REQUEST_STATE]
+        failure = webob.Response(status=401)
+        self.assertIs(failure, self.middleware.process_response(failure, request))
+        self.assertIs(state, request.environ[lifesaver.REQUEST_STATE])
+        self.assertEqual(self.subject, state['subject'])
+        self.assertIs(self.middleware, state['owner'])
+        self.assertTrue(state['accounted'])
+        self.assertEqual(90, self.balance())
+        self.assertNotIn('lifesaver', request.environ)
+        self.assertIs(failure, self.middleware.process_response(failure, request))
+        self.assertEqual(90, self.balance())
+
+    def test_legacy_marker_does_not_skip_accounting(self):
+        for phase in ('pre_auth', 'post_auth'):
+            with self.subTest(phase=phase):
+                self.seed(100)
+                request = self.request(environ={'lifesaver': self.subject})
+                middleware = self.make_middleware(phase=phase)
+                self.assertEqual(404, request.get_response(middleware).status_int)
+                self.assertEqual(90, self.balance())
+
     def test_early_owner_skips_late_admission_and_accounting(self):
         downstream = mock.Mock(wraps=self.middleware)
         early = self.make_middleware(downstream, phase='pre_auth')
@@ -231,29 +252,12 @@ class LifesaverTestCase(unittest.TestCase):
         for _ in range(3):
             result = self.request().get_response(early)
             self.assertEqual(429, result.status_int)
+            self.assertEqual(429, result.json['error']['code'])
+            self.assertEqual('10', result.headers['Retry-After'])
+            self.assertNotIn('Vary', result.headers)
         downstream.assert_not_called()
         self.assertEqual(3, len(early.utils.memcached.calls))
         self.assertEqual(0, self.balance())
-
-    def test_early_rejections_emit_low_cardinality_metrics(self):
-        self.seed(0)
-        with mock.patch.object(lifesaver, 'DogStatsd', create=True) as metrics:
-            early = self.make_middleware(phase='pre_auth')
-            self.assertEqual(429, self.request().get_response(early).status_int)
-        metrics.return_value.increment.assert_called_once_with(
-            'early_rejections_total',
-            tags=['endpoint:s3tokens', 'reason:credit'])
-
-    def test_metric_failure_preserves_early_rejection(self):
-        self.seed(0)
-        downstream = mock.Mock()
-        early = self.make_middleware(downstream, phase='pre_auth')
-        early.metric_client.increment.side_effect = OSError('unavailable')
-        result = self.request().get_response(early)
-        self.assertEqual(429, result.status_int)
-        self.assertEqual(429, result.json['error']['code'])
-        self.assertEqual('10', result.headers['Retry-After'])
-        downstream.assert_not_called()
 
     def test_early_phase_ignores_authenticated_identity(self):
         self.seed(0, 'SCRIPT-USER')
@@ -306,6 +310,8 @@ class LifesaverTestCase(unittest.TestCase):
         result = self.request().get_response(early)
         self.assertEqual(403, result.status_int)
         self.assertIsInstance(result.json, dict)
+        self.assertEqual(403, result.json['error']['code'])
+        self.assertNotIn('Vary', result.headers)
         downstream.assert_not_called()
 
     def test_body_remains_readable_downstream(self):
@@ -325,15 +331,15 @@ class LifesaverTestCase(unittest.TestCase):
         self.assertEqual(400, request.get_response(early).status_int)
         self.assertEqual([], early.utils.memcached.calls)
 
-    def test_retry_after_tracks_next_refill_without_extending_it(self):
+    def test_retry_after_keeps_configured_interval_without_delaying_refill(self):
         self.seed(0)
         self.now.return_value = 108.2
         result = self.request().get_response(self.middleware)
         self.assertEqual(429, result.status_int)
-        self.assertEqual('2', result.headers['Retry-After'])
+        self.assertEqual('10', result.headers['Retry-After'])
         self.now.return_value = 109.1
         result = self.request().get_response(self.middleware)
-        self.assertEqual('1', result.headers['Retry-After'])
+        self.assertEqual('10', result.headers['Retry-After'])
         self.now.return_value = 110.
         self.assertEqual(404, self.request().get_response(self.middleware).status_int)
 
@@ -375,14 +381,13 @@ class ResponseTests(unittest.TestCase):
         for response_type in (response.RateLimitExceededResponse,
                               response.BlocklistResponse):
             with self.subTest(response_type=response_type):
-                result = response_type(headers=[('Vary', 'X-Auth-Token')])
+                result = response_type()
                 self.assertIsInstance(result.json, dict)
                 self.assertIn('error', result.json)
                 self.assertEqual(result.status_int, result.json['error']['code'])
                 self.assertEqual('application/json', result.content_type)
 
-    def test_setting_retry_after_replaces_header(self):
+    def test_setting_retry_after_sets_header(self):
         result = response.RateLimitExceededResponse()
         result.set_retry_after(10)
-        result.set_retry_after(2)
-        self.assertEqual(['2'], result.headers.getall('Retry-After'))
+        self.assertEqual(['10'], result.headers.getall('Retry-After'))

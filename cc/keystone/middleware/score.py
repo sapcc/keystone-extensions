@@ -12,7 +12,6 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import math
 import time
 
 
@@ -36,10 +35,6 @@ class Score(object):
             self.credit,
             self.value + self._refill_count() * self.refill_amount
         )
-
-    def retry_after(self):
-        """Return seconds until the next credit refill, rounded up to at least 1."""
-        return max(1, math.ceil(self.last_update + self.refill_time - time.time()))
 
     def reduce(self, consumption):
         refill_count = self._refill_count()

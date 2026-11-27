@@ -20,8 +20,7 @@ The auth plugins provide:
  - Radius / SecurID authentication
  - Password authentication with optional password validation against EWS and mirroring the externally validated password to LDAP
 
-The Lifesaver middleware contains repeated failures from misconfigured scripts
-by rejecting requests from subjects that have depleted their failure credit.
+The lifesaver middleware protects against abusive requests and rejects requests from users that have depleted their credit.
 
 ## Installation
 
@@ -85,18 +84,20 @@ To use the cc_x509 plugin, it needs to be configured in keystone.conf:
 
 ### The lifesaver middleware
 
-Each subject starts with configurable credit, replenished by a fixed amount
-at a fixed interval. Responses with status >= 400 deduct their configured
-cost; successful responses are free. An exhausted subject receives HTTP 429
-at admission until its next refill. `Retry-After` reports the remaining whole
-seconds until that refill. Rejected requests do not spend credit or delay refill.
+Introduces a concept of user punishment for requests that caused an error.
 
-`status_cost` applies to ordinary user/API errors. `token_cost` applies to
-`FTOKENCREDS-`, `S3CREDS-` and `EC2CREDS-` subjects. Thus missing S3/EC2 access
-keys cost 10 credits by default while ordinary API resource-lookup 404s are free.
-S3/EC2 subjects represent access keys, independently of the caller's service
-token. Their domain is `UNKNOWN`; allowlisting the caller does not exempt the
-credential subject.
+The cost of each error type (identified by a response status >= 400) can be configured.
+
+A user starts with a configurable initial credit, that is refilled by a configurable amount in a configurable interval.
+
+Once a subject has consumed its credit, new requests receive HTTP 429 until
+credit has been refilled. Requests already admitted keep their original response.
+`Retry-After` remains the configured refill interval.
+
+`token_cost` applies to token and S3/EC2 credential failures. Missing access
+keys cost 10 credits by default; ordinary API 404s still use `status_cost` and
+are free by default. S3/EC2 credit is tracked by access key, not by the caller's
+token or username.
 
 The middleware is configured in keystone.conf:
 
@@ -121,38 +122,27 @@ The middleware is configured in keystone.conf:
     # cost of token and S3/EC2 credential validation failures
     token_cost = default:1,401:10,403:5,404:10,429:0
 
-The paired Keystone Flask middleware loader installs these phases:
+The middleware is enabled by adding it to paste.ini:
 
-```text
-Request ID / size checks / URL normalization
-  -> Lifesaver (phase=pre_auth)
-  -> AuthContext
-  -> Watcher
-  -> Lifesaver (default phase=post_auth)
-  -> API
-```
+    [filter:lifesaver]
+    use = egg:keystone-extensions#lifesaver
 
-The early phase owns canonical POST `/v3/s3tokens` and `/v3/ec2tokens` requests
-with an extractable access key, including the `credential` and `ec2Credentials`
-payload aliases. It checks the shared score before service-token validation
-and accounts for the final response once. Other requests retain late,
-authenticated-identity accounting. Admitted responses keep their original
-status, headers and body even if concurrent failures exhaust the same score.
 
-Keystone loaders that check the middleware instance's `phase` retain the single
-authenticated filter with older extensions. Older Keystone loaders also remain
-supported through the default late phase. Early rejection requires both the
-updated loader and this extension; either can be upgraded first.
+    [pipeline:api_v3]
+    # The last item in this pipeline must be service_v3 or an equivalent
+    # application. It cannot be a filter.
+    pipeline = healthcheck cors sizelimit http_proxy_to_wsgi osprofiler url_normalize request_id lifesaver build_auth_context token_auth json_body ec2_extension_v3 s3_extension service_v3
 
-Scores are shared through Memcached. Positive charges use fresh `gets`/CAS
-updates, with `add` for initialization, at most three attempts and a 100 ms
-socket timeout. Cache misses, eviction, outages or persistent write contention
-fail open. Concurrent requests already admitted may complete together; this
-is a failure-credit budget rather than an exact requests-per-second limit.
+or via flask [ugly hardcoding](https://github.com/sapcc/keystone/blob/0cedc509def82d28737f9f7dfd105ec528060f18/keystone/server/flask/core.py#L76-L80)
 
-Early rejections bypass Watcher. They emit the StatsD counter
-`openstack_lifesaver.early_rejections_total` to the same local exporter
-(`127.0.0.1:9125`). Prometheus exposes
-`openstack_lifesaver_early_rejections_total` with only `endpoint`
-(`s3tokens` or `ec2tokens`) and `reason` (`credit` or `blocklist`) labels.
-Per-request rejection and credit diagnostics are DEBUG logs.
+The updated Keystone Flask loader adds a `pre_auth` filter after URL
+normalization and before AuthContext. It handles POST `/v3/s3tokens` and
+`/v3/ec2tokens` requests with an access key, checking credit before caller-token
+validation and accounting for the response once. Other requests retain their
+authenticated filtering. Older Keystone loaders use the default `post_auth`
+filter, including S3/EC2 handling. Early rejection requires both updates;
+either repository can be upgraded first.
+
+Credit deductions use bounded Memcached CAS updates to preserve concurrent
+charges. Cache failures admit requests and preserve downstream responses.
+Early rejections bypass Watcher and are not included in its metrics.

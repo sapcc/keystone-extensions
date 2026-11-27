@@ -13,7 +13,6 @@
 # under the License.
 
 
-from datadog.dogstatsd import DogStatsd
 import keystone.conf
 from oslo_log import log
 from oslo_middleware import base
@@ -36,14 +35,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         self.app = app
         self.utils = utils.LifesaverUtils(conf)
         self.phase = conf.get('phase', 'post_auth')
-        if self.phase == 'pre_auth':
-            # Send rejection metrics to the same StatsD exporter as Watcher.
-            # Watcher does not see requests rejected here. Authentication has
-            # not run yet, so these metrics have no user or domain labels.
-            self.metric_client = DogStatsd(
-                host=conf.get('statsd_host', '127.0.0.1'),
-                port=int(conf.get('statsd_port', 9125)),
-                namespace='openstack_lifesaver')
 
         if CONF.debug:
             self.logger.debug('enabled? {0}'.format(self.utils.enabled))
@@ -85,6 +76,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
                         token_hash = self.utils.hash_token_id(token_id)
                         subject = FTOKENCREDS_PREFIX + token_hash
                 if not subject:
+                    # Keep S3/EC2 filtering here for older Keystone loaders.
                     subject, domain = logic.extract_s3_ec2_credentials(request)
                 if not subject:
                     subject, domain = logic.extract_from_authentication_request(request)
@@ -105,8 +97,7 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
 
         # REQUEST_STATE records which filter handles the request's response,
         # including errors from AuthContext. Skip requests assigned to a filter.
-        # The older 'lifesaver' flag means credit has already been deducted.
-        if REQUEST_STATE in request.environ or 'lifesaver' in request.environ:
+        if REQUEST_STATE in request.environ:
             return None
         credentials = self.get_subject(request)
         if not credentials or not credentials['subject']:
@@ -123,19 +114,15 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         if subject in self.utils.user_blocklist:
             state['accounted'] = True
             self.logger.debug("Request from blocklisted subject %s rejected", subject)
-            self.record_early_rejection(request, 'blocklist')
-            return response.BlocklistResponse(headers=[('Vary', 'X-Auth-Token')])
+            return response.BlocklistResponse()
 
         subject_score = self.utils.get_score(subject)
         if subject_score.get() <= 0:
             state['accounted'] = True
             self.logger.debug("Blocking request %s %s: subject %s %s has no credit",
                               request.method, request.path, subject, domain)
-            self.record_early_rejection(request, 'credit')
-            # Early rejections skip AuthContext, so add the Vary header here.
-            result = response.RateLimitExceededResponse(
-                headers=[('Vary', 'X-Auth-Token')])
-            result.set_retry_after(subject_score.retry_after())
+            result = response.RateLimitExceededResponse()
+            result.set_retry_after(self.utils.refill_time)
             return result
         return None
 
@@ -155,7 +142,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         )
         if cost > 0:
             subject = state['subject']
-            request.environ['lifesaver'] = subject
             remaining = self.utils.deduct_credit(subject, cost)
             if remaining is not None:
                 self.logger.debug("%s %s has credit %d after %s %s returned %d",
@@ -164,17 +150,6 @@ class LifesaverMiddleware(base.ConfigurableMiddleware):
         # Return the original response. Do not replace it with HTTP 429 if
         # the credit balance reached zero while this request was running.
         return response
-
-    def record_early_rejection(self, request, reason):
-        if self.phase != 'pre_auth':
-            return
-        try:
-            self.metric_client.increment(
-                'early_rejections_total',
-                tags=['endpoint:' + request.path.rsplit('/', 1)[-1],
-                      'reason:' + reason])
-        except Exception:
-            self.logger.debug('Could not submit Lifesaver metric', exc_info=True)
 
     @classmethod
     def factory(cls, global_config, **local_config):
